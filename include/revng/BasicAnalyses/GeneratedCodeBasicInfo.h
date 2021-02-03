@@ -186,6 +186,7 @@ public:
   }
 
   const ProgramCounterHandler *programCounterHandler() {
+    revng_assert(RootFunction);
     if (not PCH) {
       llvm::Module *M = RootFunction->getParent();
       PCH = ProgramCounterHandler::fromModule(ArchType, M);
@@ -325,7 +326,10 @@ public:
 
   Successors getSuccessors(llvm::BasicBlock *BB) const;
 
-  llvm::Function *root() const { return RootFunction; }
+  llvm::Function *root() const {
+    revng_assert(RootFunction);
+    return RootFunction;
+  }
 
 private:
   static std::vector<llvm::GlobalVariable *>

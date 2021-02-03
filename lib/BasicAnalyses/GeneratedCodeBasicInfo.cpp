@@ -19,15 +19,14 @@
 using namespace llvm;
 
 void GeneratedCodeBasicInfo::run(Module &M) {
-  Function &F = *M.getFunction("root");
   NewPC = M.getFunction("newpc");
   if (NewPC != nullptr) {
     MetaAddressStruct = cast<StructType>(NewPC->arg_begin()->getType());
   }
 
-  revng_log(PassesLog, "Starting GeneratedCodeBasicInfo");
+  RootFunction = M.getFunction("root");
 
-  RootFunction = &F;
+  revng_log(PassesLog, "Starting GeneratedCodeBasicInfo");
 
   const char *MDName = "revng.input.architecture";
   NamedMDNode *InputArchMD = M.getOrInsertNamedMetadata(MDName);
@@ -56,42 +55,44 @@ void GeneratedCodeBasicInfo::run(Module &M) {
   Type *PCType = PC->getType()->getPointerElementType();
   PCRegSize = M.getDataLayout().getTypeAllocSize(PCType);
 
-  for (BasicBlock &BB : F) {
-    if (!BB.empty()) {
-      switch (getType(&BB)) {
-      case BlockType::RootDispatcherBlock:
-        revng_assert(Dispatcher == nullptr);
-        Dispatcher = &BB;
-        break;
+  if (RootFunction) {
+    for (BasicBlock &BB : *RootFunction) {
+      if (!BB.empty()) {
+        switch (getType(&BB)) {
+        case BlockType::RootDispatcherBlock:
+          revng_assert(Dispatcher == nullptr);
+          Dispatcher = &BB;
+          break;
 
-      case BlockType::DispatcherFailureBlock:
-        revng_assert(DispatcherFail == nullptr);
-        DispatcherFail = &BB;
-        break;
+        case BlockType::DispatcherFailureBlock:
+          revng_assert(DispatcherFail == nullptr);
+          DispatcherFail = &BB;
+          break;
 
-      case BlockType::AnyPCBlock:
-        revng_assert(AnyPC == nullptr);
-        AnyPC = &BB;
-        break;
+        case BlockType::AnyPCBlock:
+          revng_assert(AnyPC == nullptr);
+          AnyPC = &BB;
+          break;
 
-      case BlockType::UnexpectedPCBlock:
-        revng_assert(UnexpectedPC == nullptr);
-        UnexpectedPC = &BB;
-        break;
+        case BlockType::UnexpectedPCBlock:
+          revng_assert(UnexpectedPC == nullptr);
+          UnexpectedPC = &BB;
+          break;
 
-      case BlockType::JumpTargetBlock: {
-        auto *Call = cast<CallInst>(&*BB.begin());
-        revng_assert(Call->getCalledFunction()->getName() == "newpc");
-        JumpTargets[MetaAddress::fromConstant(Call->getArgOperand(0))] = &BB;
-        break;
-      }
-      case BlockType::RootDispatcherHelperBlock:
-      case BlockType::IndirectBranchDispatcherHelperBlock:
-      case BlockType::EntryPoint:
-      case BlockType::ExternalJumpsHandlerBlock:
-      case BlockType::TranslatedBlock:
-        // Nothing to do here
-        break;
+        case BlockType::JumpTargetBlock: {
+          auto *Call = cast<CallInst>(&*BB.begin());
+          revng_assert(Call->getCalledFunction()->getName() == "newpc");
+          JumpTargets[MetaAddress::fromConstant(Call->getArgOperand(0))] = &BB;
+          break;
+        }
+        case BlockType::RootDispatcherHelperBlock:
+        case BlockType::IndirectBranchDispatcherHelperBlock:
+        case BlockType::EntryPoint:
+        case BlockType::ExternalJumpsHandlerBlock:
+        case BlockType::TranslatedBlock:
+          // Nothing to do here
+          break;
+        }
       }
     }
   }
