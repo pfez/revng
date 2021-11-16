@@ -1,0 +1,2 @@
+leak:CreateSigAltStack
+leak:glib_init_ctor
