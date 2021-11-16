@@ -181,6 +181,7 @@ def build_opt_args(args):
                    or "libclang_rt.asan" in name)]
     if len(libasan) == 1:
         libasan_path = relative(libasan[0])
+
         original_asan_options = os.environ.get("ASAN_OPTIONS", "")
         if original_asan_options:
             asan_options = dict([option.split("=")
@@ -193,12 +194,27 @@ def build_opt_args(args):
                                      for option
                                      in asan_options.items()])
 
+        original_lsan_options = os.environ.get("LSAN_OPTIONS", "")
+        if original_lsan_options:
+            lsan_options = dict([option.split("=")
+                                 for option
+                                 in original_lsan_options.split(":")])
+        else:
+            lsan_options = dict()
+        lsan_options["suppressions"] = "../share/revng/lsan_suppressions.txt"
+        lsan_options["use_tls"] = "0"
+        new_lsan_options = ":".join(["=".join(option)
+                                     for option
+                                     in lsan_options.items()])
+
         # Use `sh` instead of `env` since `env` sometimes is not a real executable
         # but a shebang script spawning /usr/bin/coreutils, which makes gdb unhappy
         prefix = [get_command("sh"),
                   "-c",
-                  'LD_PRELOAD={} ASAN_OPTIONS={} '
-                  'exec "$0" "$@"'.format(libasan_path, new_asan_options)]
+                  'LD_PRELOAD={} ASAN_OPTIONS={} LSAN_OPTIONS={} '
+                  'exec "$0" "$@"'.format(libasan_path,
+                                          new_asan_options,
+                                          new_lsan_options)]
 
     return (prefix + [relative(get_command("opt"))]
             + interleave(roots, "-load")

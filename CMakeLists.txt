@@ -165,7 +165,8 @@ copy_to_build_and_install(FILES
   share/revng
   runtime/support.c
   runtime/support.h
-  scripts/clang-format-style-file)
+  scripts/clang-format-style-file
+  scripts/lsan_suppressions.txt)
 
 configure_file(runtime/early-linked.c "${CMAKE_BINARY_DIR}/share/revng/early-linked.c" COPYONLY)
 
