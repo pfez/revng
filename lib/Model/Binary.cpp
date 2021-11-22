@@ -86,6 +86,16 @@ Binary::getPrimitiveType(PrimitiveTypeKind::Values V, uint8_t ByteSize) {
   return getTypePath(It->get());
 }
 
+model::TypePath
+Binary::getPrimitiveType(PrimitiveTypeKind::Values V, uint8_t ByteSize) const {
+  PrimitiveType Temporary(V, ByteSize);
+  Type::Key PrimitiveKey{ TypeKind::Primitive, Temporary.ID };
+  auto It = Types.find(PrimitiveKey);
+
+  revng_assert(It != Types.end());
+  return getTypePath(It->get());
+}
+
 TypePath Binary::recordNewType(UpcastablePointer<Type> &&T) {
   auto It = Types.insert(T).first;
   return getTypePath(It->get());

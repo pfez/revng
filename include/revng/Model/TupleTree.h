@@ -7,6 +7,7 @@
 #include <array>
 #include <set>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 #include "llvm/ADT/ArrayRef.h"
@@ -25,7 +26,7 @@
 template<typename T>
 concept TupleTreeCompatible = IsKeyedObjectContainer<T>
                                 or HasTupleSize<T>
-                                or IsUpcastablePointer<T>;
+                                or UpcastablePointerLike<T>;
 // clang-format on
 
 template<typename T>
@@ -401,7 +402,7 @@ bool callOnPathSteps(Visitor &V,
   if (It == M.end())
     return false;
 
-  value_type *Matching = &*It;
+  auto *Matching = &*It;
 
   V.template visitContainerElement<RootT>(TargetKey, *Matching);
   if (Path.size() > 1) {
@@ -1013,17 +1014,29 @@ template<typename T, typename RootT>
 class TupleTreeReference {
 public:
   using pointee = T;
+  using root_t = RootT;
+  using root_variant = std::variant<RootT *, const RootT *>;
 
 public:
-  RootT *Root = nullptr;
+  root_variant Root = (RootT *) nullptr;
   TupleTreePath Path;
 
 public:
-  static TupleTreeReference fromPath(RootT *Root, const TupleTreePath &Path) {
-    TupleTreeReference Result;
-    Result.Root = Root;
-    Result.Path = Path;
-    return Result;
+  static TupleTreeReference fromPath(const RootT *Root,
+                                     const TupleTreePath &Path) {
+    return TupleTreeReference{.Root = root_variant{Root}, .Path = Path};
+  }
+
+  static TupleTreeReference fromPath(RootT *Root,
+                                     const TupleTreePath &Path) {
+    return TupleTreeReference{.Root = root_variant{Root}, .Path = Path};
+  }
+
+  static TupleTreeReference fromString(const RootT *Root, llvm::StringRef Path) {
+    std::optional<TupleTreePath> OptionalPath = stringAsPath<RootT>(Path);
+    if (not OptionalPath.has_value())
+      return TupleTreeReference{};
+    return fromPath(Root, *OptionalPath);
   }
 
   static TupleTreeReference fromString(RootT *Root, llvm::StringRef Path) {
@@ -1043,22 +1056,32 @@ public:
 
   const TupleTreePath &path() const { return Path; }
 
-  T *get() {
-    revng_check(Root != nullptr);
-
-    if (Path.size() == 0)
-      return nullptr;
-
-    return getByPath<T>(Path, *Root);
+  bool hasNullRoot() const {
+    const auto IsNullVisitor = [](const auto &Ptr) { return Ptr == nullptr; };
+    return std::visit(IsNullVisitor, Root);
   }
 
   const T *get() const {
-    revng_check(Root != nullptr);
+    revng_check(Root.index() != std::variant_npos);
+    revng_check(not hasNullRoot());
 
     if (Path.size() == 0)
       return nullptr;
 
-    return getByPath<T>(Path, *Root);
+    const auto GetByPathVisitor =
+      [&Path = std::as_const(Path)](const auto &RootPointer) {
+        return getByPath<T>(Path, *RootPointer);
+      };
+
+    return std::visit(GetByPathVisitor, Root);
+  }
+
+  T *get() {
+    // Strict check that we're not holding the const alternative
+    revng_check(not std::holds_alternative<const RootT *>(Root));
+    // Then just call the const version and cast constness away.
+    auto *const_this = const_cast<const TupleTreeReference<T, RootT> *>(this);
+    return const_cast<T *>(const_this->get());
   }
 
   bool isValid() const debug_function {
@@ -1079,7 +1102,7 @@ struct llvm::yaml::ScalarTraits<T> {
   static llvm::StringRef input(llvm::StringRef Path, void *, T &Obj) {
     // We temporarily initialize Root to nullptr, a post-processing phase will
     // take care of fixup these
-    Obj = T::fromString(nullptr, Path);
+    Obj = T::fromString((typename T::root_t *)nullptr, Path);
     return {};
   }
 
@@ -1205,7 +1228,14 @@ private:
     bool Result = true;
 
     visitReferences([&Result, this](const auto &Element) {
-      Result = Result and (Element.Root == Root.get());
+      const auto SameRoot = [&]() {
+        const auto GetPtrToConstRoot = [](const auto &RootPointer) {
+          return const_cast<const T *>(RootPointer);
+        };
+
+        return std::visit(GetPtrToConstRoot, Element.Root) == Root.get();
+      };
+      Result = Result and SameRoot();
     });
 
     return Result;
@@ -1244,3 +1274,16 @@ struct NamedEnumScalarTraits {
     }
   }
 };
+
+
+/// \brief Specialization for the std::variant we have in TupleTreeReference
+template <bool X, typename T>
+inline void writeToLog(Logger<X> &This, const std::variant<T *, const T *> &Var,
+                       int Ignored) {
+  if (Var.index() == std::variant_npos)
+    writeToLog(This, llvm::StringRef("std::variant_npos"), Ignored);
+  else if (std::holds_alternative<T *>(Var))
+    writeToLog(This, std::get<T *>(Var), Ignored);
+  else if (std::holds_alternative<const T *>(Var))
+    writeToLog(This, std::get<const T *>(Var), Ignored);
+}
