@@ -7,7 +7,10 @@
 #include "llvm/IR/ModuleSummaryIndexYAML.h"
 #include "llvm/Support/YAMLTraits.h"
 
+#include "revng/Model/Function.h"
+#include "revng/Model/Type.h"
 #include "revng/Pipeline/Target.h"
+#include "revng/Pipes/ModelGlobal.h"
 #include "revng/Pipes/StringMapContainer.h"
 #include "revng/Support/MetaAddress/YAMLTraits.h"
 #include "revng/Support/YAMLTraits.h"
@@ -46,8 +49,25 @@ void StringMapContainer::mergeBackImpl(StringMapContainer &&Other) {
 
 TargetsList StringMapContainer::enumerate() const {
   TargetsList Result;
-  for (const auto &[MetaAddress, Mapped] : Map)
+  const auto &Model = getModelFromContext(*PipelineContext);
+
+  for (const auto &[MetaAddress, Mapped] : Map) {
     Result.push_back({ MetaAddress.toString(), *TheKind });
+  }
+
+  // If all non-fake functions in the model are in Result, return All
+  const auto Fake = [](const auto &F) {
+    return F.Type != model::FunctionType::Fake;
+  };
+  const auto IsInResult = [&Result, this](const model::Function &F) {
+    return Result.contains({ F.Entry.toString(), *TheKind });
+  };
+  if (llvm::all_of(llvm::make_filter_range(Model->Functions, std::not_fn(Fake)),
+                   IsInResult)) {
+    pipeline::Target AllTargets{ pipeline::PathComponent::all(), *TheKind };
+    return pipeline::TargetsList({ AllTargets });
+  }
+
   return Result;
 }
 
