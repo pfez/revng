@@ -7,6 +7,7 @@
 #include "llvm/ADT/StringRef.h"
 
 #include "revng/Pipeline/LLVMContainer.h"
+#include "revng/Pipes/AllFunctions.h"
 #include "revng/Support/FunctionTags.h"
 
 namespace revng::pipes {
@@ -32,7 +33,9 @@ public:
 
   pipeline::TargetsList
   compactTargets(const pipeline::Context &Ctx,
-                 pipeline::TargetsList::List &Targets) const final;
+                 pipeline::TargetsList::List &Targets) const final {
+    return compactFunctionTargets(Ctx, Targets, *this);
+  }
 
   void expandTarget(const pipeline::Context &Ctx,
                     const pipeline::Target &Input,
