@@ -17,7 +17,7 @@ revng_add_library_internal(
   PipelineManager.cpp
   Pipes.cpp
   RootKind.cpp
-  StringMapContainer.cpp
+  FunctionStringMap.cpp
   TaggedFunctionKind.cpp)
 
 llvm_map_components_to_libnames(
