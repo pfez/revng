@@ -65,6 +65,7 @@ class CommandsRegistry:
         parser.add_argument(
             "--callgrind", action="store_true", help="Run programs under callgrind."
         )
+        parser.add_argument("--massif", action="store_true", help="Run programs under massif.")
         parser.add_argument(
             "--prefix", action="append", metavar="PREFIX", help="Additional search prefix."
         )
@@ -106,7 +107,7 @@ class CommandsRegistry:
             options.keep_temporaries = args.keep_temporaries
 
         if len(options.command_prefix) == 0:
-            assert (args.gdb + args.lldb + args.valgrind + args.callgrind) <= 1
+            assert (args.gdb + args.lldb + args.valgrind + args.callgrind + args.massif) <= 1
 
             if args.gdb:
                 options.command_prefix += ["gdb", "-q", "--args"]
@@ -119,6 +120,9 @@ class CommandsRegistry:
 
             if args.callgrind:
                 options.command_prefix += ["valgrind", "--tool=callgrind"]
+
+            if args.massif:
+                options.command_prefix += ["valgrind", "--tool=massif"]
 
             if args.perf:
                 options.command_prefix += [
