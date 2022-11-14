@@ -12,6 +12,30 @@
 
 namespace abi::FunctionType {
 
+namespace ArgumentKind {
+
+enum Values {
+  Scalar = 0,
+  PointerToAggregate,
+  ShadowPointerToAggregateReturnValue,
+  Invalid,
+};
+
+inline const char *getName(Values Kind) {
+  switch (Kind) {
+  case Scalar:
+    return "Scalar";
+  case PointerToAggregate:
+    return "PointerToAggregate";
+  case ShadowPointerToAggregateReturnValue:
+    return "ShadowPointerToAggregateReturnValue";
+  default:;
+  }
+  return "Invalid";
+}
+
+} // end namespace ArgumentKind
+
 /// Best effort `CABIFunctionType` to `RawFunctionType` conversion.
 ///
 /// If `ABI` is not specified, `TheBinary.DefaultABI`
@@ -49,6 +73,7 @@ public:
 
   public:
     std::optional<StackSpan> Stack;
+    ArgumentKind::Values Kind;
   };
 
 public:
@@ -111,6 +136,7 @@ public:
       } else {
         dbg << "no";
       }
+      dbg << "    Kind: " << getName(A.Kind);
       dbg << "\n";
     }
 

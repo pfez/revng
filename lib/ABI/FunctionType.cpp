@@ -14,6 +14,7 @@
 #include "revng/ADT/STLExtras.h"
 #include "revng/ADT/SmallMap.h"
 #include "revng/Model/Binary.h"
+#include "revng/Model/Generated/Early/TypeKind.h"
 #include "revng/Model/Register.h"
 #include "revng/Model/VerifyHelper.h"
 #include "revng/Support/EnumSwitch.h"
@@ -901,14 +902,6 @@ model::TypePath convertToRaw(const model::CABIFunctionType &Function,
   });
 }
 
-template<model::Architecture::Values Architecture>
-model::QualifiedType forceScalarType(const model::QualifiedType &Input) {
-  if (!Input.isScalar())
-    return Input.getPointerTo(Architecture);
-  else
-    return Input;
-}
-
 Layout::Layout(const model::CABIFunctionType &Function) :
   Layout(skippingEnumSwitch<1>(Function.ABI, [&]<model::ABI::Values A>() {
     Layout Result;
@@ -930,6 +923,7 @@ Layout::Layout(const model::CABIFunctionType &Function) :
       auto &RVLocationArg = Result.Arguments.emplace_back();
       RVLocationArg.Registers.emplace_back(AT::ReturnValueLocationRegister);
       RVLocationArg.Type = Function.ReturnType.getPointerTo(Arch);
+      RVLocationArg.Kind = ArgumentKind::ShadowPointerToAggregateReturnValue;
     }
 
     size_t CurrentOffset = 0;
@@ -938,7 +932,19 @@ Layout::Layout(const model::CABIFunctionType &Function) :
     revng_assert(Args.size() == Function.Arguments.size());
     for (size_t Index = 0; Index < Args.size(); ++Index) {
       auto &Current = Result.Arguments.emplace_back();
-      Current.Type = forceScalarType<Arch>(Function.Arguments.at(Index).Type);
+      const model::QualifiedType &ArgumentType = Function.Arguments.at(Index)
+                                                   .Type;
+
+      // Disambiguate scalar and aggregate arguments. Scalars are passed by
+      // value, aggregate by pointer.
+      if (ArgumentType.isScalar()) {
+        Current.Type = ArgumentType;
+        Current.Kind = ArgumentKind::Scalar;
+      } else {
+        Current.Type = ArgumentType.getPointerTo(Arch);
+        Current.Kind = ArgumentKind::PointerToAggregate;
+      }
+
       Current.Registers = std::move(Args[Index].Registers);
       if (Args[Index].SizeOnStack != 0) {
         // TODO: further alignment considerations are needed here.
@@ -960,28 +966,40 @@ Layout::Layout(const model::CABIFunctionType &Function) :
 Layout::Layout(const model::RawFunctionType &Function) {
   // Lay register arguments out.
   for (const model::NamedTypedRegister &Register : Function.Arguments) {
-    Arguments.emplace_back().Registers = { Register.Location };
-    Arguments.back().Type = Register.Type;
+    revng_assert(Register.Type.isScalar());
+
+    auto &Argument = Arguments.emplace_back();
+    Argument.Registers = { Register.Location };
+    Argument.Type = Register.Type;
+    Argument.Kind = ArgumentKind::Scalar;
   }
 
   // Lay the return value out.
   for (const model::TypedRegister &Register : Function.ReturnValues) {
-    ReturnValues.emplace_back().Registers = { Register.Location };
-    ReturnValues.back().Type = Register.Type;
+    auto &ReturnValue = ReturnValues.emplace_back();
+    ReturnValue.Registers = { Register.Location };
+    ReturnValue.Type = Register.Type;
   }
 
   // Lay stack arguments out.
   if (Function.StackArgumentsType.UnqualifiedType.isValid()) {
-    revng_assert(Function.StackArgumentsType.Qualifiers.empty());
     const model::QualifiedType &StackArgType = Function.StackArgumentsType;
-    const model::Type *OriginalStackType = StackArgType.UnqualifiedType.get();
-    auto *StackStruct = llvm::dyn_cast<model::StructType>(OriginalStackType);
-    revng_assert(StackStruct,
-                 "`RawFunctionType::StackArgumentsType` must be a struct.");
+    // The stack argument, if present, should always be a struct.
+    revng_assert(StackArgType.Qualifiers.empty());
+    revng_assert(StackArgType.is(model::TypeKind::StructType));
+
+    auto &Argument = Arguments.emplace_back();
+
     const auto &Arch = StackArgType.UnqualifiedType.getRoot()->Architecture;
-    Arguments.emplace_back().Type = StackArgType.getPointerTo(Arch);
+    // Stack argument is always passed by pointer for RawFunctionType
+    Argument.Type = StackArgType.getPointerTo(Arch);
+    Argument.Kind = ArgumentKind::PointerToAggregate;
+
+    // Record the size
+    const model::Type *OriginalStackType = StackArgType.UnqualifiedType.get();
+    auto *StackStruct = llvm::cast<model::StructType>(OriginalStackType);
     if (StackStruct->Size != 0)
-      Arguments.back().Stack = { 0, StackStruct->Size };
+      Argument.Stack = { 0, StackStruct->Size };
   }
 
   // Fill callee saved registers.
