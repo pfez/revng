@@ -901,16 +901,26 @@ model::TypePath convertToRaw(const model::CABIFunctionType &Function,
   });
 }
 
+template<model::Architecture::Values Architecture>
+model::QualifiedType forceScalarType(const model::QualifiedType &Input) {
+  if (!Input.isScalar())
+    return Input.getPointerTo(Architecture);
+  else
+    return Input;
+}
+
 Layout::Layout(const model::CABIFunctionType &Function) :
   Layout(skippingEnumSwitch<1>(Function.ABI, [&]<model::ABI::Values A>() {
     Layout Result;
 
     using AT = abi::Trait<A>;
+    static constexpr auto Arch = model::ABI::getArchitecture(A);
     auto RV = ConversionHelper<A>::distributeReturnValue(Function.ReturnType);
     if (RV.SizeOnStack == 0) {
       // Nothing on the stack, the return value fits into the registers.
-      Result.ReturnValues.emplace_back().Registers = std::move(RV.Registers);
-      Result.ReturnValues.back().Type = Function.ReturnType;
+      auto &ReturnValue = Result.ReturnValues.emplace_back();
+      ReturnValue.Type = Function.ReturnType;
+      ReturnValue.Registers = std::move(RV.Registers);
     } else {
       revng_assert(RV.Registers.empty(),
                    "Register and stack return values should never be present "
@@ -919,8 +929,7 @@ Layout::Layout(const model::CABIFunctionType &Function) :
                    "Big return values are not supported by the current ABI");
       auto &RVLocationArg = Result.Arguments.emplace_back();
       RVLocationArg.Registers.emplace_back(AT::ReturnValueLocationRegister);
-      static constexpr auto Architecture = model::ABI::getArchitecture(A);
-      RVLocationArg.Type = Function.ReturnType.getPointerTo(Architecture);
+      RVLocationArg.Type = Function.ReturnType.getPointerTo(Arch);
     }
 
     size_t CurrentOffset = 0;
@@ -929,7 +938,7 @@ Layout::Layout(const model::CABIFunctionType &Function) :
     revng_assert(Args.size() == Function.Arguments.size());
     for (size_t Index = 0; Index < Args.size(); ++Index) {
       auto &Current = Result.Arguments.emplace_back();
-      Current.Type = Function.Arguments.at(Index).Type;
+      Current.Type = forceScalarType<Arch>(Function.Arguments.at(Index).Type);
       Current.Registers = std::move(Args[Index].Registers);
       if (Args[Index].SizeOnStack != 0) {
         // TODO: further alignment considerations are needed here.
@@ -964,12 +973,13 @@ Layout::Layout(const model::RawFunctionType &Function) {
   // Lay stack arguments out.
   if (Function.StackArgumentsType.UnqualifiedType.isValid()) {
     revng_assert(Function.StackArgumentsType.Qualifiers.empty());
-    const model::Type *OriginalStackType = Function.StackArgumentsType
-                                             .UnqualifiedType.get();
+    const model::QualifiedType &StackArgType = Function.StackArgumentsType;
+    const model::Type *OriginalStackType = StackArgType.UnqualifiedType.get();
     auto *StackStruct = llvm::dyn_cast<model::StructType>(OriginalStackType);
     revng_assert(StackStruct,
                  "`RawFunctionType::StackArgumentsType` must be a struct.");
-    Arguments.emplace_back().Type = Function.StackArgumentsType;
+    const auto &Arch = StackArgType.UnqualifiedType.getRoot()->Architecture;
+    Arguments.emplace_back().Type = StackArgType.getPointerTo(Arch);
     if (StackStruct->Size != 0)
       Arguments.back().Stack = { 0, StackStruct->Size };
   }
