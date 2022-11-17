@@ -942,7 +942,7 @@ Layout::Layout(const model::CABIFunctionType &Function) :
         Current.Kind = ArgumentKind::Scalar;
       } else {
         Current.Type = ArgumentType.getPointerTo(Arch);
-        Current.Kind = ArgumentKind::PointerToAggregate;
+        Current.Kind = ArgumentKind::ReferenceToAggregate;
       }
 
       Current.Registers = std::move(Args[Index].Registers);
@@ -993,7 +993,7 @@ Layout::Layout(const model::RawFunctionType &Function) {
     const auto &Arch = StackArgType.UnqualifiedType.getRoot()->Architecture;
     // Stack argument is always passed by pointer for RawFunctionType
     Argument.Type = StackArgType.getPointerTo(Arch);
-    Argument.Kind = ArgumentKind::PointerToAggregate;
+    Argument.Kind = ArgumentKind::ReferenceToAggregate;
 
     // Record the size
     const model::Type *OriginalStackType = StackArgType.UnqualifiedType.get();

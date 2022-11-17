@@ -16,7 +16,7 @@ namespace ArgumentKind {
 
 enum Values {
   Scalar = 0,
-  PointerToAggregate,
+  ReferenceToAggregate,
   ShadowPointerToAggregateReturnValue,
   Invalid,
 };
@@ -25,8 +25,8 @@ inline const char *getName(Values Kind) {
   switch (Kind) {
   case Scalar:
     return "Scalar";
-  case PointerToAggregate:
-    return "PointerToAggregate";
+  case ReferenceToAggregate:
+    return "ReferenceToAggregate";
   case ShadowPointerToAggregateReturnValue:
     return "ShadowPointerToAggregateReturnValue";
   default:;
