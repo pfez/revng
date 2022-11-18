@@ -937,13 +937,11 @@ Layout::Layout(const model::CABIFunctionType &Function) :
 
       // Disambiguate scalar and aggregate arguments. Scalars are passed by
       // value, aggregate by pointer.
-      if (ArgumentType.isScalar()) {
-        Current.Type = ArgumentType;
+      Current.Type = ArgumentType;
+      if (ArgumentType.isScalar())
         Current.Kind = ArgumentKind::Scalar;
-      } else {
-        Current.Type = ArgumentType.getPointerTo(Arch);
+      else
         Current.Kind = ArgumentKind::ReferenceToAggregate;
-      }
 
       Current.Registers = std::move(Args[Index].Registers);
       if (Args[Index].SizeOnStack != 0) {
@@ -992,7 +990,7 @@ Layout::Layout(const model::RawFunctionType &Function) {
 
     const auto &Arch = StackArgType.UnqualifiedType.getRoot()->Architecture;
     // Stack argument is always passed by pointer for RawFunctionType
-    Argument.Type = StackArgType.getPointerTo(Arch);
+    Argument.Type = StackArgType;
     Argument.Kind = ArgumentKind::ReferenceToAggregate;
 
     // Record the size
