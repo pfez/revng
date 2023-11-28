@@ -1110,7 +1110,9 @@ static RecursiveCoroutine<bool> verifyImpl(VerifyHelper &VH,
     } else if (FieldEndOffset > T->Size()) {
       // Otherwise, if this field is the last, check that it's not larger than
       // size.
-      rc_return VH.fail("Last field ends outside the struct", *T);
+      rc_return VH.fail("Last field ends " + Twine(FieldEndOffset - T->Size())
+                          + " bytes outside the struct",
+                        *T);
     }
 
     if (isVoidConst(&Field.Type()).IsVoid)
