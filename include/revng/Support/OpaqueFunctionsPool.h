@@ -5,6 +5,8 @@
 //
 
 #include <map>
+#include <tuple>
+#include <type_traits>
 
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/Attributes.h"
@@ -22,19 +24,19 @@ template<typename T>
 concept PointerToLLVMTypeOrDerived = std::derived_from<std::remove_pointer_t<T>,
                                                        llvm::Type>;
 
-template<typename KeyT>
+template<typename... KeyTypes>
 class OpaqueFunctionsPool {
 private:
-  llvm::Module *M;
+  llvm::Module &M;
   const bool PurgeOnDestruction;
-  std::map<KeyT, llvm::Function *> Pool;
+  std::map<std::tuple<KeyTypes...>, llvm::Function *> Pool;
   llvm::AttributeList AttributeSets;
   llvm::MemoryEffects MemoryEffects = llvm::MemoryEffects::none();
   FunctionTags::TagsSet Tags;
 
 public:
   OpaqueFunctionsPool(llvm::Module *M, bool PurgeOnDestruction) :
-    M(M), PurgeOnDestruction(PurgeOnDestruction) {}
+    M(*M), PurgeOnDestruction(PurgeOnDestruction) {}
 
   ~OpaqueFunctionsPool() {
     if (PurgeOnDestruction) {
@@ -48,7 +50,7 @@ public:
 public:
   void addFnAttribute(llvm::Attribute::AttrKind Kind) {
     using namespace llvm;
-    AttributeSets = AttributeSets.addFnAttribute(M->getContext(), Kind);
+    AttributeSets = AttributeSets.addFnAttribute(M.getContext(), Kind);
   }
 
   void setMemoryEffects(const llvm::MemoryEffects &NewMemoryEffects) {
@@ -71,8 +73,9 @@ public:
   }
 
 public:
-  llvm::Function *
-  get(KeyT Key, llvm::FunctionType *FT, const llvm::Twine &Name = {}) {
+  llvm::Function *get(std::tuple<KeyTypes...> Key,
+                      llvm::FunctionType *FT,
+                      const llvm::Twine &Name = {}) {
     using namespace llvm;
 
     Function *F = nullptr;
@@ -80,7 +83,7 @@ public:
     if (It != Pool.end()) {
       F = It->second;
     } else {
-      F = Function::Create(FT, GlobalValue::ExternalLinkage, Name, M);
+      F = Function::Create(FT, GlobalValue::ExternalLinkage, Name, &M);
       F->setAttributes(AttributeSets);
       F->setMemoryEffects(MemoryEffects);
       Tags.set(F);
@@ -93,49 +96,99 @@ public:
     return F;
   }
 
-  llvm::Function *get(KeyT Key,
+  llvm::Function *get(std::tuple<KeyTypes...> Key,
                       llvm::Type *ReturnType = nullptr,
                       llvm::ArrayRef<llvm::Type *> Arguments = {},
                       const llvm::Twine &Name = {}) {
     using namespace llvm;
     if (ReturnType == nullptr)
-      ReturnType = Type::getVoidTy(M->getContext());
+      ReturnType = Type::getVoidTy(M.getContext());
 
     return get(Key, FunctionType::get(ReturnType, Arguments, false), Name);
   }
 
+private:
+  template<int N, typename... Types>
+  using NthType = std::tuple_element<N, std::tuple<Types...>>::type;
+
+  template<std::size_t N>
+  using NthTypeLikeInKey = std::remove_pointer_t<NthType<N, KeyTypes...>>;
+
+  template<bool ReturnIsKey,
+           std::size_t... ArgumentIndicesInFunctionPrototype,
+           std::size_t... Indices>
+  static void
+  initializeArgumentTypesInKey(llvm::Function &F,
+                               std::tuple<KeyTypes...> &Key,
+                               const std::index_sequence<Indices...> &) {
+
+    const auto AssignArgument =
+      [&Key, &F]<std::size_t ArgumentIndexInKey,
+                 std::size_t ArgumentIndexInFunctionType>() {
+        using TypeLike = NthTypeLikeInKey<ArgumentIndexInKey>;
+        std::get<ArgumentIndexInKey>(Key) = llvm::cast<
+          TypeLike>(F.getArg(ArgumentIndexInFunctionType)->getType());
+      };
+
+    constexpr std::size_t InitialIndexForArgumentsInKey = ReturnIsKey ? 1 : 0;
+    ((AssignArgument
+        .template operator()<InitialIndexForArgumentsInKey + Indices,
+                             ArgumentIndicesInFunctionPrototype>()),
+     ...);
+  }
+
+public:
   /// Initialize the pool with all the functions in M that match the tag TheTag,
-  /// using the return type as key.
-  void initializeFromReturnType(const FunctionTags::Tag &TheTag)
-    requires std::derived_from<std::remove_pointer_t<KeyT>, llvm::Type>
+  /// using the return type and/or the argument types as key, according to the
+  /// what specified in the template parameters.
+  template<bool ReturnTypeIsKey, std::size_t... IndicesOfKeyArgumentTypes>
+  void initializeFromType(const FunctionTags::Tag &TheTag)
+    requires((std::derived_from<std::remove_pointer_t<KeyTypes>, llvm::Type>)
+             and ...)
   {
-    using TypeLike = std::remove_pointer_t<KeyT>;
-    for (llvm::Function &F : TheTag.functions(M)) {
-      auto *RetType = F.getFunctionType()->getReturnType();
-      if (auto *KeyType = dyn_cast<TypeLike>(RetType))
-        record(KeyType, &F);
+    for (llvm::Function &F : TheTag.functions(&M)) {
+
+      std::tuple<KeyTypes...> Key;
+
+      if constexpr (ReturnTypeIsKey) {
+        auto *RetType = F.getFunctionType()->getReturnType();
+        using TypeLike = std::remove_pointer_t<NthType<0, KeyTypes...>>;
+        std::get<0>(Key) = cast<TypeLike>(RetType);
+      }
+
+      auto PackIndices = std::make_index_sequence<
+        sizeof...(IndicesOfKeyArgumentTypes)>();
+      if constexpr (PackIndices.size() != 0) {
+        initializeArgumentTypesInKey<ReturnTypeIsKey,
+                                     IndicesOfKeyArgumentTypes...>(F,
+                                                                   Key,
+                                                                   PackIndices);
+      }
+
+      recordUnchecked(Key, &F);
     }
   }
 
   /// Initialize the pool with all the functions in M that match the tag TheTag,
-  /// using the type of the ArgNo-th argument as key.
-  void initializeFromNthArgType(const FunctionTags::Tag &TheTag, unsigned ArgNo)
-    requires std::derived_from<std::remove_pointer_t<KeyT>, llvm::Type>
-  {
-    using TypeLike = std::remove_pointer_t<KeyT>;
-    for (llvm::Function &F : TheTag.functions(M)) {
-      auto ArgType = F.getFunctionType()->getParamType(ArgNo);
-      if (auto *KeyType = dyn_cast<TypeLike>(ArgType))
-        record(KeyType, &F);
-    }
+  /// using the return type as key.
+  void initializeFromReturnType(const FunctionTags::Tag &TheTag) {
+    return initializeFromType<true>(TheTag);
+  }
+
+  /// Initialize the pool with all the functions in M that match the tag TheTag,
+  /// using the type of the Nth argument as key.
+  template<std::size_t N>
+  void initializeFromNthArgType(const FunctionTags::Tag &TheTag) {
+    return initializeFromType<false, N>(TheTag);
   }
 
   /// Initialize the pool with all the functions in M that match the tag TheTag,
   /// using the type of the ArgNo-th argument as key.
   void initializeFromName(const FunctionTags::Tag &TheTag)
-    requires std::is_same_v<KeyT, std::string>
+    requires(std::tuple_size_v<std::tuple<KeyTypes...>> > 0
+             and std::is_same_v<NthType<0, KeyTypes...>, std::string>)
   {
-    for (llvm::Function &F : TheTag.functions(M))
       record(F.getName().str(), &F);
+    for (llvm::Function &F : TheTag.functions(&M))
   }
 };
