@@ -63,13 +63,21 @@ public:
   auto begin() const { return Pool.begin(); }
   auto end() const { return Pool.end(); }
 
-public:
-  void record(KeyT Key, llvm::Function *F) {
-    auto It = Pool.find(Key);
-    if (It == Pool.end())
-      Pool[Key] = F;
-    else
+protected:
+  template<bool CheckConsistency>
+  void recordImpl(std::tuple<KeyTypes...> Key, llvm::Function *F) {
+    const auto &[It, New] = Pool.insert({ std::move(Key), F });
+    if constexpr (CheckConsistency)
       revng_assert(It->second == F);
+  }
+
+  void recordUnchecked(std::tuple<KeyTypes...> Key, llvm::Function *F) {
+    recordImpl<false>(Key, F);
+  }
+
+public:
+  void record(std::tuple<KeyTypes...> Key, llvm::Function *F) {
+    recordImpl<true>(Key, F);
   }
 
 public:
@@ -188,7 +196,7 @@ public:
     requires(std::tuple_size_v<std::tuple<KeyTypes...>> > 0
              and std::is_same_v<NthType<0, KeyTypes...>, std::string>)
   {
-      record(F.getName().str(), &F);
     for (llvm::Function &F : TheTag.functions(&M))
+      recordUnchecked(F.getName().str(), &F);
   }
 };
