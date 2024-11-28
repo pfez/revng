@@ -37,12 +37,12 @@ public:
   using inner_iterator = decltype(cppcoro::generator<T>().begin());
 
 private:
-  mutable cppcoro::generator<T> Generator;
+  cppcoro::generator<T> Generator;
   inner_iterator Begin;
 
   // Optional field is used when constructing a snapshotted iterator, i.e. a
   // special iterator state which can only be dereferenced.
-  mutable std::optional<T> Snapshot;
+  std::optional<T> Snapshot;
 
 public:
   // Constructor building an empty coroutine, with no snapshots.
