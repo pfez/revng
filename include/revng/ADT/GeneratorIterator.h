@@ -79,6 +79,7 @@ public:
       // fact moved.
       this->Generator = std::move(Other.Generator);
       this->Begin = std::move(Other.Begin);
+      Other.Begin = {};
     }
     return *this;
   }
