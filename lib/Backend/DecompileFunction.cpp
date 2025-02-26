@@ -448,11 +448,18 @@ std::string CCodeGenerator::buildCastExpr(StringRef ExprToCast,
   if (SrcType == DestType)
     return ExprToCast.str();
 
-  revng_assert(*SrcType.skipTypedefs() == *DestType.skipTypedefs()
-               or (SrcType.isScalar() and DestType.isScalar()));
+  std::string WarningComment;
+  if (*SrcType.skipTypedefs() != *DestType.skipTypedefs()
+      and (not SrcType.isScalar() or not DestType.isScalar())) {
+    WarningComment = B.getBlockComment("WARNING: this cast will not compile",
+                                       false);
+    revng_log(Log, "WARNING: emitting a invalid C cast");
+  }
 
-  return addAlwaysParentheses(B.getTypeName(DestType)) + " "
-         + addParentheses(ExprToCast);
+  return addAlwaysParentheses((llvm::Twine{ B.getTypeName(DestType) }
+                               + llvm::Twine{ WarningComment })
+                                .str())
+         + " " + addParentheses(ExprToCast);
 }
 
 static std::string getUndefToken(const model::Type &UndefType,
