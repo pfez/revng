@@ -15,7 +15,6 @@ revng_add_library_internal(
   Debug.cpp
   ExplicitSpecializations.cpp
   IRAnnotators.cpp
-  FunctionTags.cpp
   IRHelpers.cpp
   LDDTree.cpp
   MetaAddress.cpp
