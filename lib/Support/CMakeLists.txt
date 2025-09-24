@@ -14,7 +14,6 @@ revng_add_library_internal(
   CustomizedLLVMPasses.cpp
   Debug.cpp
   ExplicitSpecializations.cpp
-  IRAnnotators.cpp
   IRHelpers.cpp
   LDDTree.cpp
   MetaAddress.cpp
