@@ -13,6 +13,7 @@ revng_add_analyses_library_internal(
   NameBuilder.cpp
   TypeSystemPrinter.cpp
   Processing.cpp
+  ProgramCounterHandler.cpp
   Type.cpp
   TypeDefinition.cpp
   Verification.cpp
