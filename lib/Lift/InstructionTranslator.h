@@ -12,10 +12,10 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Pass.h"
 
+#include "revng/Lift/PTCDump.h"
 #include "revng/Support/ProgramCounterHandler.h"
 
 #include "JumpTargetManager.h"
-#include "PTCDump.h"
 
 // Forward declarations
 namespace llvm {
