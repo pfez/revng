@@ -8,8 +8,8 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/ModRef.h"
 
+#include "revng/Model/FunctionTags.h"
 #include "revng/Support/Assert.h"
-#include "revng/Support/FunctionTags.h"
 #include "revng/Support/ProgramCounterHandler.h"
 
 // This name corresponds to a function in `early-linked`.

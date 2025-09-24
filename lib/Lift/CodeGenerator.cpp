@@ -43,11 +43,11 @@
 #include "revng/FunctionCallIdentification/PruneRetSuccessors.h"
 #include "revng/Lift/VariableManager.h"
 #include "revng/Model/Architecture.h"
+#include "revng/Model/FunctionTags.h"
 #include "revng/Model/Importer/DebugInfo/DwarfImporter.h"
 #include "revng/Model/RawBinaryView.h"
 #include "revng/Support/CommandLine.h"
 #include "revng/Support/Debug.h"
-#include "revng/Support/FunctionTags.h"
 #include "revng/Support/ProgramCounterHandler.h"
 
 #include "CodeGenerator.h"

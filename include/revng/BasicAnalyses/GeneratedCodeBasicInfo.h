@@ -20,9 +20,9 @@
 #include "revng/Lift/Lift.h"
 #include "revng/Model/Architecture.h"
 #include "revng/Model/Binary.h"
+#include "revng/Model/FunctionTags.h"
 #include "revng/Model/LoadModelPass.h"
 #include "revng/Support/BlockType.h"
-#include "revng/Support/FunctionTags.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/Support/ProgramCounterHandler.h"
 

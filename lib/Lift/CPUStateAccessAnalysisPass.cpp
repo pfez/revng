@@ -23,8 +23,8 @@
 
 #include "revng/Lift/CPUStateAccessAnalysisPass.h"
 #include "revng/Lift/VariableManager.h"
+#include "revng/Model/FunctionTags.h"
 #include "revng/Support/Debug.h"
-#include "revng/Support/FunctionTags.h"
 #include "revng/Support/IRHelperRegistry.h"
 #include "revng/Support/IRHelpers.h"
 

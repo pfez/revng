@@ -12,8 +12,8 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/Support/ManagedStatic.h"
 
+#include "revng/Model/FunctionTags.h"
 #include "revng/Support/Assert.h"
-#include "revng/Support/FunctionTags.h"
 #include "revng/Support/IRHelpers.h"
 
 using namespace llvm;
