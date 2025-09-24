@@ -15,9 +15,9 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_os_ostream.h"
 
+#include "revng/Lift/IRAnnotators.h"
 #include "revng/Model/FunctionTags.h"
 #include "revng/Support/Assert.h"
-#include "revng/Support/IRAnnotators.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/Support/SelfReferencingDbgAnnotationWriter.h"
 
