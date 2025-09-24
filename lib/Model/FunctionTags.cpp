@@ -3,7 +3,7 @@
 //
 
 #include "revng/Model/FunctionTags.h"
-#include "revng/Support/ProgramCounterHandler.h"
+#include "revng/Model/ProgramCounterHandler.h"
 
 namespace FunctionTags {
 

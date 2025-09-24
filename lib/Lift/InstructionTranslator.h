@@ -13,7 +13,7 @@
 #include "llvm/Pass.h"
 
 #include "revng/Lift/PTCDump.h"
-#include "revng/Support/ProgramCounterHandler.h"
+#include "revng/Model/ProgramCounterHandler.h"
 
 #include "JumpTargetManager.h"
 
