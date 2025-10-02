@@ -8,7 +8,6 @@ revng_add_analyses_library_internal(
   Binary.cpp
   CommonTypeMethods.cpp
   FunctionTags.cpp
-  IRAnnotators.cpp
   LoadModelPass.cpp
   NameBuilder.cpp
   TypeSystemPrinter.cpp
