@@ -362,3 +362,14 @@ llvm::FunctionType *getAssignFunctionType(llvm::Type *ValueType,
 /// operand is a reference.
 llvm::FunctionType *getCopyType(llvm::Type *ReturnedType,
                                 llvm::Type *VariableReferenceType);
+
+//
+// {is,get}CallToIsolatedFunction
+//
+const llvm::CallInst *getCallToIsolatedFunction(const llvm::Value *V);
+
+llvm::CallInst *getCallToIsolatedFunction(llvm::Value *V);
+
+inline bool isCallToIsolatedFunction(const llvm::Value *V) {
+  return getCallToIsolatedFunction(V) != nullptr;
+}

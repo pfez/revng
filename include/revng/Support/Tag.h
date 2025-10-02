@@ -206,14 +206,3 @@ llvm::CallInst *getCallToTagged(llvm::Value *V, const FunctionTags::Tag &T);
 inline bool isCallToTagged(const llvm::Value *V, const FunctionTags::Tag &T) {
   return getCallToTagged(V, T) != nullptr;
 }
-
-//
-// {is,get}CallToIsolatedFunction
-//
-const llvm::CallInst *getCallToIsolatedFunction(const llvm::Value *V);
-
-llvm::CallInst *getCallToIsolatedFunction(llvm::Value *V);
-
-inline bool isCallToIsolatedFunction(const llvm::Value *V) {
-  return getCallToIsolatedFunction(V) != nullptr;
-}

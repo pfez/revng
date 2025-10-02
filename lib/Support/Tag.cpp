@@ -74,35 +74,3 @@ llvm::CallInst *getCallToTagged(llvm::Value *V, const FunctionTags::Tag &T) {
 
   return nullptr;
 }
-
-const llvm::CallInst *getCallToIsolatedFunction(const llvm::Value *V) {
-  if (const llvm::CallInst *Call = getCallToTagged(V, FunctionTags::Isolated)) {
-    // The callee is an isolated function
-    return Call;
-  } else if (const llvm::CallInst
-               *Call = getCallToTagged(V, FunctionTags::DynamicFunction)) {
-    // The callee is a dynamic function
-    return Call;
-  } else if (auto *Call = dyn_cast<llvm::CallInst>(V)) {
-    // It's a call to an isolated function if it's indirect
-    return getCalledFunction(Call) == nullptr ? Call : nullptr;
-  } else {
-    return nullptr;
-  }
-}
-
-llvm::CallInst *getCallToIsolatedFunction(llvm::Value *V) {
-  if (llvm::CallInst *Call = getCallToTagged(V, FunctionTags::Isolated)) {
-    // The callee is an isolated function
-    return Call;
-  } else if (llvm::CallInst
-               *Call = getCallToTagged(V, FunctionTags::DynamicFunction)) {
-    // The callee is a dynamic function
-    return Call;
-  } else if (auto *Call = dyn_cast<llvm::CallInst>(V)) {
-    // It's a call to an isolated function if it's indirect
-    return getCalledFunction(Call) == nullptr ? Call : nullptr;
-  } else {
-    return nullptr;
-  }
-}
