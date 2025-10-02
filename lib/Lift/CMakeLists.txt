@@ -18,6 +18,7 @@ revng_add_library_internal(
   JumpTargetManager.cpp
   PTCDump.cpp
   RootAnalyzer.cpp
+  SelfReferencingDbgAnnotationWriter.cpp
   ValueMaterializerPass.cpp
   VariableManager.cpp)
 

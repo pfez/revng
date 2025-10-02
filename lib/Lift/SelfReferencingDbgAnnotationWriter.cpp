@@ -11,8 +11,8 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/Support/FormattedStream.h"
 
+#include "revng/Lift/SelfReferencingDbgAnnotationWriter.h"
 #include "revng/Model/FunctionTags.h"
-#include "revng/Support/SelfReferencingDbgAnnotationWriter.h"
 
 using namespace llvm;
 

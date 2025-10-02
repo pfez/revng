@@ -22,7 +22,6 @@ revng_add_library_internal(
   PathList.cpp
   Progress.cpp
   ResourceFinder.cpp
-  SelfReferencingDbgAnnotationWriter.cpp
   Statistics.cpp
   Tag.cpp
   GzipTarFile.cpp
