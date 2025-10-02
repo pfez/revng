@@ -12,8 +12,8 @@
 
 #include "revng/ADT/STLExtras.h"
 #include "revng/Model/FunctionTags.h"
+#include "revng/Recompile/OriginalAssemblyAnnotationWriter.h"
 #include "revng/Support/IRHelpers.h"
-#include "revng/Support/OriginalAssemblyAnnotationWriter.h"
 
 using namespace llvm;
 

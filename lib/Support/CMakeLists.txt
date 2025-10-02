@@ -19,7 +19,6 @@ revng_add_library_internal(
   MetaAddress.cpp
   ModuleStatistics.cpp
   OnQuit.cpp
-  OriginalAssemblyAnnotationWriter.cpp
   PathList.cpp
   Progress.cpp
   ResourceFinder.cpp

@@ -24,9 +24,9 @@
 #include "revng/Pipeline/Target.h"
 #include "revng/Pipes/Kinds.h"
 #include "revng/Recompile/CompileModulePipe.h"
+#include "revng/Recompile/OriginalAssemblyAnnotationWriter.h"
 #include "revng/Support/Assert.h"
 #include "revng/Support/IRHelpers.h"
-#include "revng/Support/OriginalAssemblyAnnotationWriter.h"
 
 using namespace llvm;
 using namespace llvm::codegen;
