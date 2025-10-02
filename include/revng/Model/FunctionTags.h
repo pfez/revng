@@ -18,7 +18,6 @@ namespace FunctionTags {
 
 extern Tag QEMU;
 extern Tag Helper;
-extern Tag Isolated;
 extern Tag ABIEnforced;
 extern Tag CSVsPromoted;
 extern Tag Exceptional;
@@ -35,9 +34,7 @@ extern Tag WriterFunction;
 extern Tag ReaderFunction;
 extern Tag OpaqueReturnAddressFunction;
 extern Tag CSV;
-extern Tag UniquedByPrototype;
 inline const char *UniqueIDMDName = "revng.unique_id";
-extern Tag UniquedByMetadata;
 extern Tag AllocatesLocalVariable;
 extern Tag ReturnsPolymorphic;
 extern Tag IsRef;

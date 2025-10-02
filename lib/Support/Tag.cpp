@@ -20,6 +20,12 @@ using namespace llvm;
 
 namespace FunctionTags {
 
+// These are here because they are needed by Pipeline, LLVMContainer
+// specifically
+Tag UniquedByMetadata("uniqued-by-metadata");
+Tag UniquedByPrototype("uniqued-by-prototype");
+Tag Isolated("isolated");
+
 Tag::Tag(llvm::StringRef Name) : DynamicHierarchy(Name) {
 }
 Tag::Tag(llvm::StringRef Name, Tag &Parent) : DynamicHierarchy(Name, Parent) {

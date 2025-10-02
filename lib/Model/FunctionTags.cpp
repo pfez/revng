@@ -10,7 +10,6 @@ namespace FunctionTags {
 Tag QEMU("qemu");
 Tag Helper("helper");
 
-Tag Isolated("isolated");
 Tag ABIEnforced("abi-enforced", Isolated);
 Tag CSVsPromoted("csvs-promoted", ABIEnforced);
 
@@ -29,10 +28,6 @@ Tag ReaderFunction("reader-function");
 Tag OpaqueReturnAddressFunction("opaque-return-address");
 
 Tag CSV("csv");
-
-Tag UniquedByPrototype("uniqued-by-prototype");
-
-Tag UniquedByMetadata("uniqued-by-metadata");
 
 Tag AllocatesLocalVariable("allocates-local-variable");
 Tag ReturnsPolymorphic("returns-polymorphic");
