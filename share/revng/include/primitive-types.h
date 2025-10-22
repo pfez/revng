@@ -55,6 +55,14 @@ static_assert_size(generic128_t, 16);
 #endif
 
 //
+// Pointer
+//
+
+extern generic16_t undef_pointer16_t();
+extern generic32_t undef_pointer32_t();
+extern generic64_t undef_pointer64_t();
+
+//
 // PointerOrNumber
 //
 

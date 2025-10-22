@@ -13,9 +13,12 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 
+#include "revng/Model/Architecture.h"
 #include "revng/Support/Debug.h"
 #include "revng/Yield/Assembly/LLVMDisassemblerInterface.h"
 #include "revng/Yield/Function.h"
+
+#include "revng/Model/Generated/Early/Architecture.h"
 
 /// \note: this might cause multithreading problems.
 static void ensureDisassemblersWereInitializedOnce() {
@@ -32,15 +35,16 @@ static void ensureDisassemblersWereInitializedOnce() {
 using DI = LLVMDisassemblerInterface;
 DI::LLVMDisassemblerInterface(MetaAddressType::Values AddrType,
                               const model::DisassemblyConfiguration &Config) {
+  using namespace model::Architecture;
   ensureDisassemblersWereInitializedOnce();
 
-  auto LLVMArchitecture = MetaAddressType::arch(AddrType);
-  revng_assert(LLVMArchitecture.has_value(),
+  auto LLVMArchitecture = toLLVMArchitecture(MetaAddressType::arch(AddrType));
+  revng_assert(MetaAddressType::arch(AddrType) != Invalid,
                "Impossible to create a disassembler for a non-code section");
-  auto Architecture = llvm::Triple::getArchTypeName(*LLVMArchitecture);
+  auto Architecture = llvm::Triple::getArchTypeName(LLVMArchitecture);
 
   // Workaround for ARM
-  if (*LLVMArchitecture == llvm::Triple::ArchType::arm)
+  if (LLVMArchitecture == llvm::Triple::ArchType::arm)
     Architecture = "armv7";
 
   std::string ErrorMessage;
@@ -84,8 +88,8 @@ DI::LLVMDisassemblerInterface(MetaAddressType::Values AddrType,
   InstructionInformation.reset(LLVMTarget->createMCInstrInfo());
 
   unsigned AssemblyDialect = 0;
-  if (*LLVMArchitecture == llvm::Triple::ArchType::x86
-      || *LLVMArchitecture == llvm::Triple::ArchType::x86_64) {
+  if (LLVMArchitecture == llvm::Triple::ArchType::x86
+      or LLVMArchitecture == llvm::Triple::ArchType::x86_64) {
     if (not Config.UseX86ATTSyntax())
       AssemblyDialect = 1;
   }

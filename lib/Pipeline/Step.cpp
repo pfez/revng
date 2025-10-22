@@ -162,7 +162,12 @@ ContainerInvalidationMetadata::serialize(const PathTargetBimap &Map,
   std::map<pipeline::TargetInPipe, std::vector<std::string>> TemporaryMap;
 
   for (const auto &Content : Map) {
+#ifdef VECTOR_BIMAP
+    if (true) {
+      const TargetInContainer &Entry = Content.second;
+#else
     for (const TargetInContainer &Entry : Content.second) {
+#endif
       if (Entry.getContainerName() != ContainerName)
         continue;
 
@@ -275,6 +280,10 @@ void Step::explainExecutedPipe(const InvokableWrapperBase &Wrapper,
       ExplanationLogger << "  " << ContainerName << "\n";
   }
   ExplanationLogger << DoLog;
+}
+
+namespace model {
+class Model;
 }
 
 ContainerSet Step::run(ContainerSet &&Input,
@@ -410,7 +419,13 @@ void Step::registerTargetsDependingOn(llvm::StringRef GlobalName,
                                       Logger<> &Log) const {
   ContainerToTargetsMap ToInvalidateMap;
 
+  Task T(3, "Computing invalidation for step " + getName());
+
+  T.advance("Compute invalidation for each pipe", true);
+
+  Task T2(Pipes.size(), "Handling pipewise invalidation");
   for (const PipeWrapper &Pipe : Pipes) {
+    T2.advance(Pipe.Pipe->getName(), true);
     revng_log(Log, "Handling the " << Pipe.Pipe->getName() << " pipe");
     LoggerIndent<> Indent(Log);
     Pipe.InvalidationMetadata.registerTargetsDependingOn(*TheContext,
@@ -421,6 +436,7 @@ void Step::registerTargetsDependingOn(llvm::StringRef GlobalName,
     Pipe.Pipe->deduceResults(*TheContext, ToInvalidateMap);
   }
 
+  T.advance("Intersect", true);
   for (auto &Container : ToInvalidateMap) {
     if (Containers.contains(Container.first())) {
       Container.second = Container.second.intersect(Containers
@@ -429,6 +445,7 @@ void Step::registerTargetsDependingOn(llvm::StringRef GlobalName,
     }
   }
 
+  T.advance("Merge", true);
   Out[getName()].merge(ToInvalidateMap);
 }
 

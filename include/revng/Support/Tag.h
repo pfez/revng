@@ -193,8 +193,6 @@ extern Tag UniquedByMetadata;
 extern Tag UniquedByPrototype;
 extern Tag Isolated;
 
-} // namespace FunctionTags
-
 //
 // {is,get}CallToTagged
 //
@@ -206,3 +204,9 @@ llvm::CallInst *getCallToTagged(llvm::Value *V, const FunctionTags::Tag &T);
 inline bool isCallToTagged(const llvm::Value *V, const FunctionTags::Tag &T) {
   return getCallToTagged(V, T) != nullptr;
 }
+
+extern Tag UniquedByMetadata;
+extern Tag UniquedByPrototype;
+extern Tag Isolated;
+
+} // namespace FunctionTags

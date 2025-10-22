@@ -28,8 +28,8 @@ concept PointerToLLVMTypeOrDerived = std::derived_from<std::remove_pointer_t<T>,
 template<typename KeyT>
 class OpaqueFunctionsPool {
 private:
-  llvm::Module *M;
-  const bool PurgeOnDestruction;
+  llvm::Module *M = nullptr;
+  const bool PurgeOnDestruction = false;
   std::map<KeyT, llvm::Function *> Pool;
   llvm::AttributeList AttributeSets;
   llvm::MemoryEffects MemoryEffects = llvm::MemoryEffects::none();
@@ -81,6 +81,9 @@ public:
   }
 
 public:
+  // WIP FINAL: review all the usages of Name and consider normalizing to
+  //            snake_case, possibly derived by the corresponding
+  //            FunctionPoolTag
   llvm::Function *
   get(KeyT Key, llvm::FunctionType *FT, const llvm::Twine &Name = {}) {
     using namespace llvm;

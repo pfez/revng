@@ -17,7 +17,17 @@ void InvalidationMetadata::registerTargetsDependingOn(const Context &Context,
                                                         &Out,
                                                       Logger<> &Log) const {
   if (auto Iter = PathCache.find(GlobalName); Iter != PathCache.end()) {
+#ifdef VECTOR_BIMAP
+    auto &Bimap = Iter->second;
+    auto Range = Bimap.find(Path);
 
+    for (const auto &Entry : Range) {
+      revng_log(Log,
+                Entry.second.getTarget().toString()
+                  << " in " << Entry.second.getContainerName() << "\n");
+      Out.add(Entry.second.getContainerName(), Entry.second.getTarget());
+    }
+#else
     auto &Bimap = Iter->second;
     auto It = Bimap.find(Path);
     if (It == Bimap.end())
@@ -34,6 +44,7 @@ void InvalidationMetadata::registerTargetsDependingOn(const Context &Context,
 
     for (const auto &Entry : It->second)
       Out.add(Entry.getContainerName(), Entry.getTarget());
+#endif
   }
 }
 
@@ -49,6 +60,23 @@ void InvalidationMetadata::remove(const ContainerToTargetsMap &Map) {
 
 void InvalidationMetadata::dump(const pipeline::Context &Context,
                                 unsigned Indentation) const {
+#ifdef VECTOR_BIMAP
+  for (const auto &[GlobalName, InvalidationData] : PathCache) {
+    indent(dbg, Indentation);
+    dbg << "Global " << GlobalName.str() << ":\n";
+
+    for (const auto &[Path, Target] : PathCache.find(GlobalName)->second) {
+      indent(dbg, Indentation + 1);
+
+      dbg << llvm::cantFail(Context.getGlobals().get(GlobalName))
+               ->serializePath(Path)
+               .value_or("(unavailable)")
+          << ": ";
+      Target.dump(dbg);
+      dbg << "\n";
+    }
+  }
+#else
   for (const auto &[GlobalName, InvalidationData] : PathCache) {
     indent(dbg, Indentation);
     dbg << "Global " << GlobalName.str() << ":\n";
@@ -66,4 +94,5 @@ void InvalidationMetadata::dump(const pipeline::Context &Context,
       }
     }
   }
+#endif
 }

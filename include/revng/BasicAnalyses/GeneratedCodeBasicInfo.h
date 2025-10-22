@@ -163,9 +163,7 @@ public:
   const ProgramCounterHandler *programCounterHandler() {
     if (not PCH) {
       llvm::Module *M = RootFunction->getParent();
-      using namespace model::Architecture;
-      auto Architecture = toLLVMArchitecture(Binary->Architecture());
-      PCH = ProgramCounterHandler::fromModule(Architecture, M);
+      PCH = ProgramCounterHandler::fromModule(Binary->Architecture(), M);
     }
 
     return PCH.get();
@@ -300,9 +298,7 @@ public:
   }
 
   MetaAddress fromPC(uint64_t PC) const {
-    using namespace model::Architecture;
-    auto Architecture = toLLVMArchitecture(Binary->Architecture());
-    return MetaAddress::fromPC(Architecture, PC);
+    return MetaAddress::fromPC(Binary->Architecture(), PC);
   }
 
   llvm::Function *root() {
@@ -312,6 +308,10 @@ public:
 
   llvm::SmallVector<std::pair<llvm::BasicBlock *, bool>, 4>
   blocksByPCRange(MetaAddress Start, MetaAddress End);
+
+  bool hasDelaySlot() const {
+    return model::Architecture::hasDelaySlot(Binary->Architecture());
+  }
 
 private:
   void parseRoot();

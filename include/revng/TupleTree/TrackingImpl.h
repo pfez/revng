@@ -10,6 +10,8 @@
 #include "revng/TupleTree/Tracking.h"
 #include "revng/TupleTree/Visits.h"
 
+#define RECURSIVE
+
 namespace revng {
 
 struct TrackingImpl {
@@ -61,6 +63,7 @@ struct TrackingImpl {
     }
   };
 
+#ifdef RECURSIVE
   template<typename M, size_t I = 0, typename T>
   static void
   collectTuple(const T &LHS, TupleTreePath &Stack, ReadFields &Info) {
@@ -77,12 +80,16 @@ struct TrackingImpl {
       collectTuple<M, I + 1>(LHS, Stack, Info);
     }
   }
+#endif
 
   template<typename M, StrictSpecializationOf<UpcastablePointer> T>
   static void collectImpl(const T &UP, TupleTreePath &Stack, ReadFields &Info) {
     if (!UP.isEmpty()) {
+      auto KindTrackingSuspender = UP.get()->KindTracker.suspend();
       UP.upcast([&](auto &Upcasted) {
         // Don't forget to add the kind of the polymorphic object to the stack.
+        static_assert(!std::is_const_v<
+                      std::remove_reference_t<decltype(Upcasted)>>);
         Stack.push_back(Upcasted.Kind());
         collectImpl<M>(Upcasted, Stack, Info);
         Stack.pop_back();
@@ -90,11 +97,47 @@ struct TrackingImpl {
     }
   }
 
+#ifdef RECURSIVE
   template<typename M, TupleSizeCompatible T>
   static void
   collectImpl(const T &LHS, TupleTreePath &Stack, ReadFields &Info) {
     collectTuple<M>(LHS, Stack, Info);
   }
+
+#else
+  // collectImpl remains unchanged
+  template<typename M, TupleSizeCompatible T>
+  static void
+  collectImpl(const T &LHS, TupleTreePath &Stack, ReadFields &Info) {
+    collectTuple<M>(LHS, Stack, Info);
+  }
+
+  // Helper function with index sequence
+  template<typename M, typename T, size_t... Is>
+  static void collectTupleImpl(const T &LHS,
+                               TupleTreePath &Stack,
+                               ReadFields &Info,
+                               std::index_sequence<Is...>) {
+    // Use a fold expression to process each index
+    (...,
+     (Stack.push_back(Is),
+      (LHS.template getTracker<Is>().isSet() ?
+         (Info.Read.insert(Stack), void()) :
+         void()),
+      collectImpl<M>(LHS.template untrackedGet<Is>(), Stack, Info),
+      Stack.pop_back()));
+  }
+
+  // Main function using index sequence
+  template<typename M, typename T>
+  static void
+  collectTuple(const T &LHS, TupleTreePath &Stack, ReadFields &Info) {
+    collectTupleImpl<M>(LHS,
+                        Stack,
+                        Info,
+                        std::make_index_sequence<std::tuple_size_v<T>>{});
+  }
+#endif
 
   template<typename M, revng::SetOrKOC T>
   static void
@@ -112,7 +155,11 @@ struct TrackingImpl {
     for (auto &LHSElement : LHS.Content) {
       using value_type = typename T::value_type;
 
-      Stack.push_back(KeyedObjectTraits<value_type>::key(LHSElement));
+      using Type = decltype(LHSElement);
+      auto &Mutable = const_cast<std::remove_cvref_t<Type> &>(LHSElement);
+      static_assert(!std::is_const_v<
+                    std::remove_reference_t<decltype(Mutable)>>);
+      Stack.push_back(KeyedObjectTraits<value_type>::key(Mutable));
 
       collectImpl<M>(LHSElement, Stack, Info);
       Stack.pop_back();
@@ -139,8 +186,10 @@ struct TrackingImpl {
            typename Visitor,
            StrictSpecializationOf<UpcastablePointer> T>
   static void visitImpl(T &UP) {
-    if (!UP.isEmpty())
+    if (!UP.isEmpty()) {
+      auto KindTrackingSuspender = UP.get()->KindTracker.suspend();
       UP.upcast([&](const auto &Upcasted) { visitImpl<M, Visitor>(Upcasted); });
+    }
   }
 
   template<typename M, typename Visitor, TupleSizeCompatible T>

@@ -422,6 +422,7 @@ Branches:
             UsedContainers: [functions.bc.zstd]
             Passes:
               - hoist-struct-phis
+              - instsimplify
               - legacy-segregate-stack-accesses
               - cleanup-stack-size-markers
               - dce
@@ -487,6 +488,8 @@ Branches:
               - remove-llvmassume-calls
               - dce
               - remove-pointer-casts
+              # WIP FINAL: try to remove
+              - hoist-struct-phis
               - make-model-gep
               - dce
               - twoscomplement-normalization
@@ -648,6 +651,7 @@ Branches:
             UsedContainers: [functions.bc.zstd]
             Passes:
               - hoist-struct-phis
+              - instsimplify
               - segregate-stack-accesses
               - cleanup-stack-size-markers
               - dce

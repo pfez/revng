@@ -10,7 +10,7 @@
 #include "revng/PipeboxCommon/Helpers/PipeRunPipes/Base.h"
 #include "revng/PipeboxCommon/Helpers/PipeRunPipes/Helpers.h"
 #include "revng/PipeboxCommon/LLVMContainer.h"
-#include "revng/Support/FunctionTags.h"
+#include "revng/Model/FunctionTags.h"
 
 namespace detail {
 

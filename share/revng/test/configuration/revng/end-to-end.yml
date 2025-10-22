@@ -187,4 +187,4 @@ commands:
         fi
 
         revng check-decompiled-c "$OUTDIR/decompiled.c" -I"$OUTDIR" -m"$POINTER_SIZE" $DEFINES \
-          2> "$OUTDIR/check-decompiled-c.log"
+          |& tee "$OUTDIR/check-decompiled-c.log"

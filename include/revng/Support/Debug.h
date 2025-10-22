@@ -33,6 +33,7 @@ struct LogTerminator {
 };
 #define DoLog (LogTerminator{ __FILE__, __LINE__ })
 
+// WIP FINAL: drop StaticEnabled
 /// Logger that self-registers itself, can be disabled, has a name and follows
 /// the global indentation level
 ///
@@ -95,6 +96,7 @@ private:
   bool Enabled;
 };
 
+// WIP FINAL: drop StaticEnabled
 /// Indent all loggers within the scope of this object
 template<bool StaticEnabled = true>
 class LoggerIndent {
@@ -198,7 +200,7 @@ private:
 
 #define revng_log(Logger, Expr)  \
   do {                           \
-    if (Logger.isEnabled()) {    \
+    if ((Logger).isEnabled()) {  \
       (Logger) << Expr << DoLog; \
     }                            \
   } while (0)

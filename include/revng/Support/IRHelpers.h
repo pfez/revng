@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <optional>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -585,9 +586,16 @@ inline llvm::Module *getModule(llvm::Value *I) {
 
 /// Helper class to easily create and use LLVM metadata
 class QuickMetadata {
+private:
+  llvm::LLVMContext &C;
+  llvm::IntegerType *Int1Ty;
+  llvm::IntegerType *Int32Ty;
+  llvm::IntegerType *Int64Ty;
+
 public:
   QuickMetadata(llvm::LLVMContext &Context) :
     C(Context),
+    Int1Ty(llvm::IntegerType::get(C, 1)),
     Int32Ty(llvm::IntegerType::get(C, 32)),
     Int64Ty(llvm::IntegerType::get(C, 64)) {}
 
@@ -605,6 +613,11 @@ public:
 
   llvm::ConstantAsMetadata *get(llvm::Constant *C) {
     return llvm::ConstantAsMetadata::get(C);
+  }
+
+  llvm::ConstantAsMetadata *get(bool Boolean) {
+    auto *Constant = llvm::ConstantInt::get(Int1Ty, Boolean);
+    return llvm::ConstantAsMetadata::get(Constant);
   }
 
   llvm::ConstantAsMetadata *get(uint32_t Integer) {
@@ -653,6 +666,11 @@ public:
   }
 
   template<typename T>
+  T extract(const llvm::Metadata *Tuple, unsigned Index) {
+    return extract<T>(cast<llvm::MDTuple>(Tuple), Index);
+  }
+
+  template<typename T>
   T extract(const llvm::Metadata *MD) {
     revng_abort();
   }
@@ -661,11 +679,6 @@ public:
   T extract(llvm::Metadata *MD) {
     revng_abort();
   }
-
-private:
-  llvm::LLVMContext &C;
-  llvm::IntegerType *Int32Ty;
-  llvm::IntegerType *Int64Ty;
 };
 
 template<>
@@ -700,6 +713,18 @@ inline llvm::ConstantInt *
 QuickMetadata::extract<llvm::ConstantInt *>(llvm::Metadata *MD) {
   auto *C = llvm::cast<llvm::ConstantAsMetadata>(MD);
   return llvm::cast<llvm::ConstantInt>(C->getValue());
+}
+
+template<>
+inline bool QuickMetadata::extract<bool>(const llvm::Metadata *MD) {
+  auto *C = llvm::cast<llvm::ConstantAsMetadata>(MD);
+  return getLimitedValue(C->getValue()) != 0;
+}
+
+template<>
+inline bool QuickMetadata::extract<bool>(llvm::Metadata *MD) {
+  auto *C = llvm::cast<llvm::ConstantAsMetadata>(MD);
+  return getLimitedValue(C->getValue()) != 0;
 }
 
 template<>
@@ -904,26 +929,6 @@ inline const llvm::CallInst *getCallTo(const llvm::Instruction *I,
     return llvm::cast<llvm::CallInst>(I);
   else
     return nullptr;
-}
-
-inline std::vector<llvm::GlobalVariable *> extractCSVs(llvm::Instruction *Call,
-                                                       unsigned MDKindID) {
-  using namespace llvm;
-
-  std::vector<GlobalVariable *> Result;
-  auto *Tuple = cast_or_null<MDTuple>(Call->getMetadata(MDKindID));
-  if (Tuple == nullptr)
-    return Result;
-
-  QuickMetadata QMD(getContext(Call));
-
-  auto OperandsRange = QMD.extract<MDTuple *>(Tuple, 1)->operands();
-  for (const MDOperand &Operand : OperandsRange) {
-    auto *CSV = QMD.extract<Constant *>(Operand.get());
-    Result.push_back(cast<GlobalVariable>(CSV));
-  }
-
-  return Result;
 }
 
 inline bool CompareByName(const llvm::GlobalVariable *LHS,
@@ -1534,12 +1539,16 @@ public:
 
 void sortModule(llvm::Module &M);
 
+std::unique_ptr<llvm::Module> parseIR(llvm::LLVMContext &Context,
+                                      llvm::StringRef Path);
+
 /// \p FinalLinkage final linkage for all the globals. Use std::nullopt to
 ///    preserve the original one.
 void linkModules(std::unique_ptr<llvm::Module> &&Source,
                  llvm::Module &Destination,
                  std::optional<llvm::GlobalValue::LinkageTypes> FinalLinkage);
+
 inline void linkModules(std::unique_ptr<llvm::Module> &&Source,
-                        llvm::Module &Destination) {
-  return linkModules(std::move(Source), Destination, std::nullopt);
+                 llvm::Module &Destination) {
+  linkModules(std::move(Source), Destination, std::nullopt);
 }

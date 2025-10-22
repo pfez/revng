@@ -58,6 +58,7 @@ bool RemoveExtractValues::runOnFunction(llvm::Function &F) {
     auto *EVFunctionType = getOpaqueEVFunctionType(I);
     FunctionTags::TypePair Key = { I->getType(),
                                    I->getAggregateOperand()->getType() };
+    // WIP: why do we need to specify OpaqueExtractvalue?
     auto *ExtractValueFunction = OpaqueEVPool.get(Key,
                                                   EVFunctionType,
                                                   "OpaqueExtractvalue");
