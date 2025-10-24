@@ -691,4 +691,3 @@ void linkModules(std::unique_ptr<Module> &&Source,
         F->setLinkage(FinalLinkage.value_or(Linkage));
   }
 }
-

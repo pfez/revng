@@ -247,7 +247,7 @@ public:
 
     // WIP
     dbg << "Helpers summary:\n";
-    CSUA.dumpStats(dbg);
+    CSUA.dumpStats(dbg, "  ");
     Log << DoLog;
 
     T.advance("Adding annotations");

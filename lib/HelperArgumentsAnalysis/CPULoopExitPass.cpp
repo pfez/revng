@@ -58,7 +58,7 @@ static ReturnInst *createRet(Instruction *Position) {
 
 /// Find all calls to cpu_loop_exit and replace them with:
 ///
-/// * call cpu_loop
+/// * call invoke_handle_exception
 /// * set cpu_loop_exiting = true
 /// * return
 ///

@@ -50,6 +50,7 @@ static RecursiveCoroutine<PointerSet> fromValueImpl(const Value &V) {
     case BinaryOperatorValue::Subtract:
       rc_return LHS.add(RHS.negate());
     case BinaryOperatorValue::Multiply:
+      // WIP: constraint on value range using SCEV/LVI?
       if (const int64_t *Value = LHS.getConstant())
         rc_return PointerSet::fromStrided(*Value);
       else if (const int64_t *Value = RHS.getConstant())
@@ -197,6 +198,9 @@ CPUStateUsageAnalysis::computeAccessesInRoot(const Value &Offset) const {
           if (ArraySize % Stride == 0) {
             WorkList.push_back({ 0, ArraySize / Stride, Stride });
             StrideToArraySize.erase(ElementSize);
+            revng_log(Log,
+                      "Stride " << Stride << " assigned to an array of "
+                                << Elements << " of size " << ElementSize);
             Found = true;
             break;
           }
@@ -298,7 +302,7 @@ void CPUStateUsageAnalysis::analyze(llvm::Function &Function) {
     revng_log(Log,
               "Consindering " << HelperResult.RawAUAResults.Accesses.size()
                               << " memory accesses");
-    for (const MemoryAccess &Access : HelperResult.RawAUAResults.Accesses) {
+    for (auto &[Access, Count] : HelperResult.RawAUAResults.Accesses) {
 
       if (not Access.start().collectArguments().contains(ArgumentIndex)) {
         revng_log(Log,
@@ -334,6 +338,10 @@ void CPUStateUsageAnalysis::analyze(llvm::Function &Function) {
       }
 
       revng_assert(MaybeOffsets->size() > 0);
+
+      // Update the number of accesses this expands to
+      revng_assert(Count == 0);
+      Count = MaybeOffsets->size();
 
       if (Log.isEnabled()) {
         Log << "Offsets: {";

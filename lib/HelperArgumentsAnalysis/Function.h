@@ -259,9 +259,23 @@ public:
   template<typename O>
   void dump(O &Output, llvm::StringRef Prefix) const {
     if (LocalAccesses.size() > 0) {
-      Output << Prefix.str() << "Local accesses:\n";
+      Output << Prefix.str() << "Local reads:\n";
+      std::set<const Value *> Reads;
       for (const MemoryAccess &Access : LocalAccesses)
-        Output << Prefix.str() << "  " << Access.toString() << "\n";
+        if (not Access.isWrite())
+          Reads.insert(&Access.start());
+
+      for (const Value *Read : Reads)
+        Output << Prefix.str() << "  " << Read->toString() << "\n";
+
+      Output << Prefix.str() << "Local writes:\n";
+      std::set<const Value *> Writes;
+      for (const MemoryAccess &Access : LocalAccesses)
+        if (Access.isWrite())
+          Writes.insert(&Access.start());
+
+      for (const Value *Write : Writes)
+        Output << Prefix.str() << "  " << Write->toString() << "\n";
     }
 
     if (LocalEscapedArguments.size() > 0) {

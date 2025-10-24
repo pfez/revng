@@ -89,12 +89,13 @@ public:
 };
 
 struct GlobalAUAResults {
-  std::set<MemoryAccess> Accesses;
+  /// The value of the map is the number of accesses it is expanded to
+  std::map<MemoryAccess, unsigned> Accesses;
   std::set<EscapedArgument> EscapedArguments;
 
   void registerAccess(const MemoryAccess &Access) {
     if (Access.start().collect<ArgumentValue>().size() > 0)
-      Accesses.insert(Access);
+      Accesses.insert({ Access, 0 });
   }
 };
 
@@ -131,8 +132,10 @@ public:
 
     if (RawAUAResults.Accesses.size() > 0) {
       Output << Prefix.str() << "Global accesses:\n";
-      for (const auto &Access : RawAUAResults.Accesses)
-        Output << Prefix.str() << "  " << Access.toString() << "\n";
+      for (const auto &[Access, Count] : RawAUAResults.Accesses)
+        Output << Prefix.str() << "  " << Access.toString() << " (" << Count
+               << "x)"
+               << "\n";
     }
 
     if (RawAUAResults.EscapedArguments.size() > 0) {
@@ -280,16 +283,34 @@ public:
 
 public:
   template<typename O>
-  void dumpStats(O &Stream) const {
+  void dumpStats(O &Stream, llvm::StringRef Prefix) const {
     for (auto &&[Function, Usage] : HelperCPUStateUsage) {
-      Stream << Function->getName().str() << ": ";
+      Stream << Prefix.str() << Function->getName().str() << ": ";
       if (Usage.Escapes) {
         Stream << "escapes";
       } else {
         Stream << "reads " << Usage.Reads.size() << " fields and ";
-        Stream << "writes " << Usage.Writes.size() << " fields";
+        Stream << "writes " << Usage.Writes.size() << " fields.";
       }
       Stream << "\n";
+
+      std::map<llvm::Function *, std::pair<unsigned, unsigned>> CalleeStats;
+      for (auto &[Access, Count] : Usage.RawAUAResults.Accesses) {
+        if (auto *I = dyn_cast<llvm::Instruction>(Access.location()
+                                                    .getUser())) {
+          if (Access.isWrite())
+            CalleeStats[I->getFunction()].second += Count;
+          else
+            CalleeStats[I->getFunction()].first += Count;
+        }
+      }
+
+      for (auto &[F, P] : CalleeStats) {
+        auto [ReadCount, WriteCount] = P;
+        Stream << Prefix.str() << "  " << F->getName().str() << ": reads "
+               << ReadCount << " fields and writes " << WriteCount
+               << " fields.\n";
+      }
     }
   }
 

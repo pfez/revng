@@ -1549,6 +1549,6 @@ void linkModules(std::unique_ptr<llvm::Module> &&Source,
                  std::optional<llvm::GlobalValue::LinkageTypes> FinalLinkage);
 
 inline void linkModules(std::unique_ptr<llvm::Module> &&Source,
-                 llvm::Module &Destination) {
+                        llvm::Module &Destination) {
   linkModules(std::move(Source), Destination, std::nullopt);
 }

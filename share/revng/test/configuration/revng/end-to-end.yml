@@ -152,11 +152,15 @@ commands:
         set -euo pipefail
 
         ARTIFACT="$1"
-        BINARY="$2"
-        MODEL="$3"
-        RESUME="$4"
-        POINTER_SIZE="$5"
-        LEGACY_MODE_EXTRA_CFLAGS="$6"
+        shift
+        BINARY="$1"
+        shift
+        MODEL="$1"
+        shift
+        RESUME="$1"
+        shift
+        POINTER_SIZE="$1"
+        shift
 
         OUTDIR="$RESUME/e2e-test-$ARTIFACT"
         mkdir -p "$OUTDIR"
@@ -187,5 +191,5 @@ commands:
           DEFINES="-DLEGACY_BACKEND"
         fi
 
-        revng check-decompiled-c "$OUTDIR/decompiled.c" -I"$OUTDIR" $LEGACY_MODE_EXTRA_CFLAGS -m"$POINTER_SIZE" $DEFINES \
+        revng check-decompiled-c "$OUTDIR/decompiled.c" -I"$OUTDIR" "$@" -m"$POINTER_SIZE" $DEFINES \
           |& tee "$OUTDIR/check-decompiled-c.log"
