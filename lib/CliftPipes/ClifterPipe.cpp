@@ -16,7 +16,7 @@ namespace {
 
 class LLVMToCliftPipe {
 public:
-  static constexpr auto Name = "llvm-to-clift";
+  static constexpr auto Name = "clifter";
 
   std::array<pipeline::ContractGroup, 1> getContract() const {
     using namespace pipeline;
