@@ -68,6 +68,58 @@ const model::TypeDefinition *Common<CRTP>::getPrototype() const {
 }
 
 template<typename CRTP>
+model::TypeDefinition *Common<CRTP>::getRawFunction() {
+  model::Type *U = skipTypedefs();
+  if (U && U->isConst())
+    return nullptr;
+
+  if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
+    if (llvm::isa<model::RawFunctionDefinition>(Definition))
+      return Definition;
+
+  return nullptr;
+}
+
+template<typename CRTP>
+const model::TypeDefinition *Common<CRTP>::getRawFunction() const {
+  const model::Type *U = skipTypedefs();
+  if (U && U->isConst())
+    return nullptr;
+
+  if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
+    if (llvm::isa<model::RawFunctionDefinition>(Definition))
+      return Definition;
+
+  return nullptr;
+}
+
+template<typename CRTP>
+model::TypeDefinition *Common<CRTP>::getCABIFunction() {
+  model::Type *U = skipTypedefs();
+  if (U && U->isConst())
+    return nullptr;
+
+  if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
+    if (llvm::isa<model::CABIFunctionDefinition>(Definition))
+      return Definition;
+
+  return nullptr;
+}
+
+template<typename CRTP>
+const model::TypeDefinition *Common<CRTP>::getCABIFunction() const {
+  const model::Type *U = skipTypedefs();
+  if (U && U->isConst())
+    return nullptr;
+
+  if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
+    if (llvm::isa<model::CABIFunctionDefinition>(Definition))
+      return Definition;
+
+  return nullptr;
+}
+
+template<typename CRTP>
 model::StructDefinition *Common<CRTP>::getStruct() {
   model::Type *U = skipConstAndTypedefs();
   if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
