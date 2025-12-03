@@ -70,6 +70,38 @@ public:
       revng_abort("Not a prototype!");
   }
 
+  model::TypeDefinition *getCABIFunction();
+  const model::TypeDefinition *getCABIFunction() const;
+  bool isCABIFunction() const { return getCABIFunction() != nullptr; }
+  model::TypeDefinition &toCABIFunction() {
+    if (model::TypeDefinition *Result = getCABIFunction())
+      return *Result;
+    else
+      revng_abort("Not a C ABI function!");
+  }
+  const model::TypeDefinition &toCABIFunction() const {
+    if (const model::TypeDefinition *Result = getCABIFunction())
+      return *Result;
+    else
+      revng_abort("Not a C ABI function!");
+  }
+
+  model::TypeDefinition *getRawFunction();
+  const model::TypeDefinition *getRawFunction() const;
+  bool isRawFunction() const { return getRawFunction() != nullptr; }
+  model::TypeDefinition &toRawFunction() {
+    if (model::TypeDefinition *Result = getRawFunction())
+      return *Result;
+    else
+      revng_abort("Not a raw function!");
+  }
+  const model::TypeDefinition &toRawFunction() const {
+    if (const model::TypeDefinition *Result = getRawFunction())
+      return *Result;
+    else
+      revng_abort("Not a raw function!");
+  }
+
   model::StructDefinition *getStruct();
   const model::StructDefinition *getStruct() const;
   bool isStruct() const { return getStruct() != nullptr; }
