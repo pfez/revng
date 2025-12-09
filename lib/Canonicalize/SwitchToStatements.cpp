@@ -22,9 +22,12 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
+#include "llvm/PassInfo.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/Debug.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
@@ -101,17 +104,13 @@ using ProgramPointNode = BidirectionalNode<ProgramPointData>;
 using ProgramPointsCFG = GenericGraph<ProgramPointNode>;
 
 template<bool IsLegacy>
-struct AvailableExpressionsAnalysis;
+struct AvailableExpressionsMonotoneFramework;
 
 template<bool IsLegacy>
-using AEA = AvailableExpressionsAnalysis<IsLegacy>;
-
-template<bool IsLegacy>
-struct AvailableExpressionsAnalysis {
+struct AvailableExpressionsMonotoneFramework {
   using GraphType = ProgramPointsCFG *;
   using LatticeElement = AvailableSet<IsLegacy>;
   using Label = ProgramPointNode *;
-  using MFPResult = MFP::MFPResult<LatticeElement>;
 
   LatticeElement combineValues(const LatticeElement &LHS,
                                const LatticeElement &RHS) const {
@@ -128,13 +127,13 @@ struct AvailableExpressionsAnalysis {
 };
 
 template<bool IsLegacy>
-using LatticeElement = AEA<IsLegacy>::LatticeElement;
+using AEMFP = AvailableExpressionsMonotoneFramework<IsLegacy>;
 
 template<bool IsLegacy>
-using MFPResult = AEA<IsLegacy>::MFPResult;
+using LatticeElement = AEMFP<IsLegacy>::LatticeElement;
 
 template<bool IsLegacy>
-using ResultMap = std::map<ProgramPointNode *, MFPResult<IsLegacy>>;
+using AvailableExpressionsMap = MFP::MFIResultMap<AEMFP<IsLegacy>>;
 
 static bool causesExponentialDataflowPaths(const Instruction *I) {
   // This forces all various kinds of instructions to get their value stored
@@ -485,9 +484,9 @@ static void applyTransferFunction(Instruction *I, LatticeElement<false> &E) {
 }
 
 template<bool IsLegacy>
-AEA<IsLegacy>::LatticeElement
-AEA<IsLegacy>::applyTransferFunction(ProgramPointNode *ProgramPoint,
-                                     const AEA<IsLegacy>::LatticeElement &E)
+AEMFP<IsLegacy>::LatticeElement
+AEMFP<IsLegacy>::applyTransferFunction(ProgramPointNode *ProgramPoint,
+                                       const AEMFP<IsLegacy>::LatticeElement &E)
   const {
 
   Instruction *I = ProgramPoint->TheInstruction;
@@ -535,14 +534,15 @@ using InstructionProgramPoint = std::unordered_map<const Instruction *,
 // An extended version of ProgramPointsCFG, that holds a graph of statements
 // points, along with a map from each Instruction to its previous statement.
 template<bool IsLegacy>
-class ProgramPointsGraphWithInstructionMap {
+class AvailableExpressionsResult {
 public:
   using AvailableExpression = AvailableExpression<IsLegacy>;
   using AvailableSet = AvailableSet<IsLegacy>;
-  using ResultMap = ResultMap<IsLegacy>;
+  using AvailableExpressionsMap = AvailableExpressionsMap<IsLegacy>;
 
 public:
   ProgramPointsCFG ProgramPointsGraph;
+  AvailableExpressionsMap AvailableExpressions;
 
 private:
   // Map an Instruction to its associated program point in ProgramPointsGraph
@@ -558,12 +558,12 @@ private:
 
 public:
   // Factory from llvm::Function
-  static ProgramPointsGraphWithInstructionMap makeFromFunction(Function &F) {
+  static AvailableExpressionsResult makeFromFunction(Function &F) {
 
     SmallMap<BasicBlock *, std::pair<ProgramPointNode *, ProgramPointNode *>, 8>
       BlockToBeginEndNode;
 
-    ProgramPointsGraphWithInstructionMap Result;
+    AvailableExpressionsResult Result;
 
     ProgramPointsCFG &TheCFG = Result.ProgramPointsGraph;
     InstructionProgramPoint &ProgramPoint = Result.ProgramPoint;
@@ -638,9 +638,7 @@ public:
   }
 
 public:
-  auto getAvailableAt(Instruction *I,
-                      const Instruction *Where,
-                      const ResultMap &MFPResultMap) const {
+  auto getAvailableAt(Instruction *I, const Instruction *Where) const {
 
     revng_log(Log, "IsAvailableAt");
     revng_log(Log, "I: " << dumpToString(I));
@@ -651,7 +649,8 @@ public:
       revng_log(Log, "is ProgramPoint");
 
       ProgramPointNode *UserProgramPoint = ProgramPointIt->second;
-      const AvailableSet &Available = MFPResultMap.at(UserProgramPoint).InValue;
+      const AvailableSet &Available = AvailableExpressions.at(UserProgramPoint)
+                                        .InValue;
       return findAvailableRange(Available, I);
     }
 
@@ -663,7 +662,7 @@ public:
       revng_log(Log,
                 "Previous ProgramPoint: "
                   << dumpToString(UserProgramPoint->TheInstruction));
-      const AvailableSet &Available = MFPResultMap.at(UserProgramPoint)
+      const AvailableSet &Available = AvailableExpressions.at(UserProgramPoint)
                                         .OutValue;
       return findAvailableRange(Available, I);
     }
@@ -676,34 +675,34 @@ public:
       revng_log(Log,
                 "first ProgramPoint in BasicBlock: "
                   << dumpToString(UserProgramPoint->TheInstruction));
-      const AvailableSet &Available = MFPResultMap.at(UserProgramPoint).InValue;
+      const AvailableSet &Available = AvailableExpressions.at(UserProgramPoint)
+                                        .InValue;
       return findAvailableRange(Available, I);
     }
 
     revng_abort();
   }
 
-  bool isAvailableAt(Instruction *I,
-                     const Instruction *Where,
-                     const ResultMap &MFPResultMap) const {
-    bool Result = not getAvailableAt(I, Where, MFPResultMap).empty();
+  bool isAvailableAt(Instruction *I, const Instruction *Where) const {
+    bool Result = not getAvailableAt(I, Where).empty();
     revng_log(Log, "Result: " << Result);
     return Result;
   }
 };
 
 template<bool IsLegacy>
-using PPGWithInstructionMap = ProgramPointsGraphWithInstructionMap<IsLegacy>;
+using AEResult = AvailableExpressionsResult<IsLegacy>;
 
 template<bool IsLegacy>
-static ResultMap<IsLegacy> getMFP(ProgramPointsCFG *TheGraph) {
+static AEResult<IsLegacy> getAvailableExpressions(Function &F) {
   using AvailableExpression = AvailableExpression<IsLegacy>;
   using AvailableSet = AvailableSet<IsLegacy>;
-  using AEA = AEA<IsLegacy>;
   using AssignType = AssignType<IsLegacy>;
 
+  auto Result = AEResult<IsLegacy>::makeFromFunction(F);
+
   AvailableSet Bottom;
-  for (ProgramPointNode *N : llvm::nodes(TheGraph)) {
+  for (ProgramPointNode *N : llvm::nodes(&Result.ProgramPointsGraph)) {
     Instruction *I = N->TheInstruction;
 
     if (mayReadMemory(*I)) {
@@ -735,11 +734,17 @@ static ResultMap<IsLegacy> getMFP(ProgramPointsCFG *TheGraph) {
   }
 
   AvailableSet Empty{};
-  return MFP::getMaximalFixedPoint<AEA>({},
-                                        TheGraph,
-                                        Bottom,
-                                        Empty,
-                                        { TheGraph->getEntryNode() });
+  ProgramPointsCFG *Graph = &Result.ProgramPointsGraph;
+  ProgramPointNode *Entry = Graph->getEntryNode();
+
+  // std::exchange here is only needed to make revng check-conventions happy.
+  std::exchange(Result.AvailableExpressions,
+                MFP::getMaximalFixedPoint<AEMFP<IsLegacy>>({},
+                                                           Graph,
+                                                           Bottom,
+                                                           Empty,
+                                                           { Entry }));
+  return Result;
 }
 
 template<bool IsLegacy>
@@ -750,23 +755,59 @@ struct PickedInstructions {
 };
 
 template<bool IsLegacy>
-class InstructionToSerializePicker {
+class AvailableExpressionsAnalysis
+  : public llvm::AnalysisInfoMixin<AvailableExpressionsAnalysis<IsLegacy>> {
+
+  friend llvm::AnalysisInfoMixin<AvailableExpressionsAnalysis<IsLegacy>>;
+  static llvm::AnalysisKey Key;
+
 public:
-  using PickedInstructions = PickedInstructions<IsLegacy>;
-  using PPGWithInstructionMap = PPGWithInstructionMap<IsLegacy>;
-  using ResultMap = ResultMap<IsLegacy>;
+  using Result = AvailableExpressionsResult<IsLegacy>;
+  Result run(llvm::Function &F, llvm::FunctionAnalysisManager &) {
+    return getAvailableExpressions<IsLegacy>(F);
+  }
+};
+
+template<>
+AnalysisKey AvailableExpressionsAnalysis<true>::Key = {};
+template<>
+AnalysisKey AvailableExpressionsAnalysis<false>::Key = {};
+
+template<bool IsLegacy>
+using AEA = AvailableExpressionsAnalysis<IsLegacy>;
+
+template<bool IsLegacy>
+class InstructionToSerializePicker
+  : public AnalysisInfoMixin<InstructionToSerializePicker<IsLegacy>> {
+  friend llvm::AnalysisInfoMixin<InstructionToSerializePicker<IsLegacy>>;
+  static llvm::AnalysisKey Key;
+
+public:
+  using Result = PickedInstructions<IsLegacy>;
   using AvailableExpression = AvailableExpression<IsLegacy>;
   using AssignType = AssignType<IsLegacy>;
 
-public:
-  InstructionToSerializePicker(Function &TheF,
-                               const PPGWithInstructionMap &TheGraph,
-                               const ResultMap &TheMFPResult) :
-    F(TheF), Graph(TheGraph), MFPResultMap(TheMFPResult), Picked() {}
+private:
+  const AEResult<IsLegacy> *AvailableExpressions = nullptr;
+  std::unordered_map<const Instruction *, size_t> ProgramOrdering = {};
+  Result Picked;
 
 public:
-  const PickedInstructions &pick() {
+  InstructionToSerializePicker() :
+    AvailableExpressions(nullptr), ProgramOrdering() {}
+
+public:
+  Result run(llvm::Function &F, llvm::FunctionAnalysisManager &FAM) {
+    AvailableExpressions = &FAM.getResult<AEA<IsLegacy>>(F);
+
     Picked = {};
+    ProgramOrdering = {};
+
+    return pick(F);
+  }
+
+private:
+  Result pick(Function &F) {
 
     // Visit in RPO for determinism
     const auto RPO = llvm::ReversePostOrderTraversal(&F);
@@ -796,7 +837,6 @@ public:
     return Picked;
   }
 
-private:
   RecursiveCoroutine<bool>
   shouldSerializeReadBeforeOrAtI(Instruction *I, Instruction *MemoryRead) {
     revng_log(Log, "PickFrom I: " << dumpToString(I));
@@ -837,7 +877,7 @@ private:
 
     const auto IsMemoryReadAvailableAt = [this, MemoryRead](const Use &TheUse) {
       const auto *UserInstruction = cast<Instruction>(TheUse.getUser());
-      return Graph.isAvailableAt(MemoryRead, UserInstruction, MFPResultMap);
+      return AvailableExpressions->isAvailableAt(MemoryRead, UserInstruction);
     };
 
     const auto SerializeI =
@@ -894,10 +934,8 @@ private:
         }
       }
 
-      auto AvailableRange = Graph.getAvailableAt(I,
-                                                 UserInstruction,
-                                                 MFPResultMap);
-      if (AvailableRange.empty()) {
+      auto Available = AvailableExpressions->getAvailableAt(I, UserInstruction);
+      if (Available.empty()) {
         revng_log(Log, "Found unavailable use. Serialize I");
         rc_return SerializeI();
       } else {
@@ -913,7 +951,7 @@ private:
 
           AssignType *Selected = nullptr;
           size_t ProgramOrder = std::numeric_limits<size_t>::max();
-          for (const AvailableExpression &A : AvailableRange) {
+          for (const AvailableExpression &A : Available) {
             if (nullptr == A.Assignment)
               continue;
 
@@ -1047,14 +1085,12 @@ private:
   void pickFrom(Instruction *I, Instruction *MemoryRead) {
     shouldSerializeReadBeforeOrAtI(I, MemoryRead);
   }
-
-private:
-  Function &F;
-  const PPGWithInstructionMap &Graph;
-  const ResultMap &MFPResultMap;
-  PickedInstructions Picked;
-  std::unordered_map<const Instruction *, size_t> ProgramOrdering;
 };
+
+template<>
+AnalysisKey InstructionToSerializePicker<true>::Key = {};
+template<>
+AnalysisKey InstructionToSerializePicker<false>::Key = {};
 
 using TypeMap = std::map<const Value *, const model::UpcastableType>;
 
@@ -1065,6 +1101,12 @@ template<bool IsLegacy>
 class VariableInserter {
 public:
   using PickedInstructions = PickedInstructions<IsLegacy>;
+
+private:
+  const model::Binary &Model;
+  const TypeMap TheTypeMap;
+  Function &F;
+  LocalVariableBuilder<IsLegacy> LocalVariableBuilder;
 
 public:
   VariableInserter(Function &TheF,
@@ -1122,12 +1164,6 @@ private:
                                         ByteSize);
     }
   }
-
-private:
-  const model::Binary &Model;
-  const TypeMap TheTypeMap;
-  Function &F;
-  LocalVariableBuilder<IsLegacy> LocalVariableBuilder;
 };
 
 template<bool IsLegacy>
@@ -1187,7 +1223,7 @@ bool VI<IsLegacy>::shouldReplaceUseWithCopies(const Instruction *I,
 }
 
 template<bool IsLegacy>
-bool VariableInserter<IsLegacy>::serializeToLocalVariable(Instruction *I) {
+bool VI<IsLegacy>::serializeToLocalVariable(Instruction *I) {
   // We can't serialize instructions with reference semantics into local
   // variables because C doesn't have references.
   revng_assert(not isCallToTagged(I, FunctionTags::IsRef));
@@ -1242,7 +1278,44 @@ bool VariableInserter<IsLegacy>::serializeToLocalVariable(Instruction *I) {
 }
 
 template<bool IsLegacy>
-struct SwitchToStatementsPass : public FunctionPass {
+class SwitchToStatements
+  : public llvm::PassInfoMixin<SwitchToStatements<IsLegacy>> {
+
+public:
+  const model::Binary &Model;
+
+public:
+  SwitchToStatements(const model::Binary &M) : Model(M) {}
+
+public:
+  llvm::PreservedAnalyses run(llvm::Function &F,
+                              llvm::FunctionAnalysisManager &FAM) {
+
+    TypeMap InstructionTypes = {};
+    if constexpr (IsLegacy) {
+      auto ModelFunction = llvmToModelFunction(Model, F);
+      revng_assert(ModelFunction != nullptr);
+
+      InstructionTypes = initModelTypesConsideringUses(F,
+                                                       ModelFunction,
+                                                       Model,
+                                                       /* PointersOnly */
+                                                       false);
+    }
+    VariableInserter<IsLegacy> VarInserter{ F,
+                                            Model,
+                                            std::move(InstructionTypes) };
+
+    const auto
+      &Picked = FAM.getResult<InstructionToSerializePicker<IsLegacy>>(F);
+    bool Changed = VarInserter.run(Picked);
+
+    return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  }
+};
+
+template<bool IsLegacy>
+class SwitchToStatementsPass : public FunctionPass {
 public:
   static char ID;
 
@@ -1261,39 +1334,28 @@ static bool switchToStatements(const model::Binary *Model, llvm::Function &F) {
   using PPGWithInstructionMap = PPGWithInstructionMap<IsLegacy>;
   using ResultMap = ResultMap<IsLegacy>;
 
-  revng_log(Log, "switchToStatements: " << F.getName());
+  FunctionPassManager FPM;
+  FPM.addPass(SwitchToStatements<IsLegacy>(Model));
 
-  auto Graph = PPGWithInstructionMap::makeFromFunction(F);
+  FunctionAnalysisManager FAM;
+  FAM.registerPass([] { return AvailableExpressionsAnalysis<IsLegacy>(); });
+  FAM.registerPass([] { return InstructionToSerializePicker<IsLegacy>(); });
 
-  ResultMap Result = getMFP<IsLegacy>(&Graph.ProgramPointsGraph);
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
 
-  auto ModelFunction = llvmToModelFunction(*Model, F);
-  revng_assert(ModelFunction != nullptr);
+  llvm::PreservedAnalyses Preserved = FPM.run(F, FAM);
 
-  InstructionToSerializePicker InstructionPicker{ F, Graph, Result };
-
-  TypeMap InstructionTypes = {};
-  if constexpr (IsLegacy) {
-    InstructionTypes = initModelTypesConsideringUses(F,
-                                                     ModelFunction,
-                                                     *Model,
-                                                     /* PointersOnly */
-                                                     false);
-  }
-  VariableInserter<IsLegacy> VarInserter{ F,
-                                          *Model,
-                                          std::move(InstructionTypes) };
-
-  bool Changed = VarInserter.run(InstructionPicker.pick());
-
-  return Changed;
+  return Preserved.areAllPreserved() ? false : true;
 }
 
 template<>
 char SwitchToStatementsPass<false>::ID = 0;
+template class SwitchToStatementsPass<false>;
 
 template<>
 char SwitchToStatementsPass<true>::ID = 0;
+template class SwitchToStatementsPass<true>;
 
 template<bool IsLegacy>
 bool SwitchToStatementsPass<IsLegacy>::runOnFunction(llvm::Function &F) {
