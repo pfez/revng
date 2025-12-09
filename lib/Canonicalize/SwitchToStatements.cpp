@@ -14,6 +14,7 @@
 
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/BasicBlock.h"
@@ -374,6 +375,7 @@ static bool noAlias(const Instruction *I, const Instruction *J) {
   revng_log(Log, "I: " << dumpToString(I));
   revng_log(Log, "J: " << dumpToString(J));
   LoggerIndent XX{ Log };
+
   // If either instruction doesn't access memory, they are noAlias for sure.
   if (not I->mayReadOrWriteMemory()) {
     revng_log(Log, "I->mayReadOrWriteMemory() == false");
@@ -1240,11 +1242,11 @@ bool VariableInserter<IsLegacy>::serializeToLocalVariable(Instruction *I) {
 }
 
 template<bool IsLegacy>
-struct SwitchToStatements : public FunctionPass {
+struct SwitchToStatementsPass : public FunctionPass {
 public:
   static char ID;
 
-  SwitchToStatements() : FunctionPass(ID) {}
+  SwitchToStatementsPass() : FunctionPass(ID) {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
@@ -1259,7 +1261,7 @@ static bool switchToStatements(const model::Binary *Model, llvm::Function &F) {
   using PPGWithInstructionMap = PPGWithInstructionMap<IsLegacy>;
   using ResultMap = ResultMap<IsLegacy>;
 
-  revng_log(Log, "SwitchToStatements: " << F.getName());
+  revng_log(Log, "switchToStatements: " << F.getName());
 
   auto Graph = PPGWithInstructionMap::makeFromFunction(F);
 
@@ -1288,24 +1290,25 @@ static bool switchToStatements(const model::Binary *Model, llvm::Function &F) {
 }
 
 template<>
-char SwitchToStatements<false>::ID = 0;
+char SwitchToStatementsPass<false>::ID = 0;
 
 template<>
-char SwitchToStatements<true>::ID = 0;
+char SwitchToStatementsPass<true>::ID = 0;
 
 template<bool IsLegacy>
-bool SwitchToStatements<IsLegacy>::runOnFunction(llvm::Function &F) {
+bool SwitchToStatementsPass<IsLegacy>::runOnFunction(llvm::Function &F) {
   auto
     *Model = getAnalysis<LoadModelWrapperPass>().get().getReadOnlyModel().get();
   return switchToStatements<IsLegacy>(Model, F);
 }
 
-using RegisterLegacy = RegisterPass<SwitchToStatements<true>>;
+using RegisterLegacy = RegisterPass<SwitchToStatementsPass<true>>;
 static RegisterLegacy
   X("legacy-switch-to-statements", "LegacySwitchToStatements", false, false);
 
-using Register = RegisterPass<SwitchToStatements<false>>;
-static Register Y("switch-to-statements", "SwitchToStatements", false, false);
+using Register = RegisterPass<SwitchToStatementsPass<false>>;
+static Register
+  Y("switch-to-statements", "SwitchToStatementsPass", false, false);
 
 namespace revng::pypeline::piperuns {
 
