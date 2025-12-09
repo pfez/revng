@@ -4,6 +4,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/ScopeExit.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/GenericDomTree.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
@@ -1388,29 +1389,52 @@ private:
                                           False);
     }
 
-    if (auto I = llvm::dyn_cast<llvm::GetElementPtrInst>(V)) {
-      auto Alloca = llvm::cast<llvm::AllocaInst>(I->getPointerOperand());
+    if (auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(V)) {
+      const llvm::Value *GEPPointerOp = GEP->getPointerOperand();
+      mlir::Location Loc = C.getLocation(GEP);
 
-      auto It = AllocaMapping.find(Alloca);
-      revng_assert(It != AllocaMapping.end());
+      if (GEP->getNumIndices() == 1
+          and GEP->getSourceElementType()->isIntegerTy(8)) {
 
-      auto AT = mlir::cast<clift::ArrayType>(It->second.getType());
-      auto PT = C.makePointerType(AT.getElementType());
+        using PrimitiveKind::UnsignedKind;
+        auto PointerType = C.makePointerType(getPrimitiveType(1, UnsignedKind));
 
-      revng_assert(I->getNumIndices() == 2);
-      auto IndexIterator = I->idx_begin();
+        llvm::Value *GEPIndex = GEP->idx_begin()->get();
+        mlir::Value Index = rc_recur emitExpression(GEPIndex, Loc);
 
-      revng_assert(C.getConstantInt(IndexIterator->get()) == 0);
-      uint64_t Index1 = C.getConstantInt((++IndexIterator)->get());
+        auto IndexType = cast<clift::ValueType>(Index.getType());
+        auto Cmp = C.getIntptrType().getByteSize() <=> IndexType.getByteSize();
+        if (Cmp < 0)
+          Index = emitCast(Loc, Index, C.getIntptrType(), CastKind::Truncate);
+        else if (Cmp > 0)
+          Index = emitCast(Loc, Index, C.getIntptrType(), CastKind::Extend);
 
-      mlir::Location Loc = C.getLocation(I);
-      auto Operand = emitCast(Loc, It->second, PT, CastKind::Decay);
+        mlir::Value Pointer = emitCast(Loc,
+                                       rc_recur emitExpression(GEPPointerOp,
+                                                               Loc),
+                                       PointerType);
+        rc_return emitExpr<PtrAddOp>(Loc, PointerType, Pointer, Index);
+      } else if (auto *A = llvm::dyn_cast<llvm::AllocaInst>(GEPPointerOp)) {
 
-      mlir::Value Immediate = emitExpr<ImmediateOp>(Loc,
-                                                    C.getIntptrType(),
-                                                    Index1);
+        auto It = AllocaMapping.find(A);
+        revng_assert(It != AllocaMapping.end());
 
-      rc_return emitExpr<PtrAddOp>(Loc, PT, Operand, Immediate);
+        auto AT = mlir::dyn_cast<clift::ArrayType>(It->second.getType());
+        auto PointerType = C.makePointerType(AT.getElementType());
+
+        revng_assert(GEP->getNumIndices() == 2);
+        auto IndexIterator = GEP->idx_begin();
+
+        revng_assert(C.getConstantInt(IndexIterator->get()) == 0);
+        uint64_t Index = C.getConstantInt((++IndexIterator)->get());
+
+        auto Operand = emitCast(Loc, It->second, PointerType, CastKind::Decay);
+
+        mlir::Value Immediate = emitExpr<ImmediateOp>(Loc,
+                                                      C.getIntptrType(),
+                                                      Index);
+        rc_return emitExpr<PtrAddOp>(Loc, PointerType, Operand, Immediate);
+      }
     }
 
     if (auto I = llvm::dyn_cast<llvm::FreezeInst>(V))
