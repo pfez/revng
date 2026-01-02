@@ -7,6 +7,7 @@
 #include "mlir/Support/LogicalResult.h"
 
 #include "revng/ABI/Definition.h"
+#include "revng/Clift/Clift.h"
 #include "revng/Clift/CliftTypeInterfaces.h"
 #include "revng/CliftEmitC/CEmitter.h"
 #include "revng/CliftEmitC/CSemantics.h"
@@ -14,6 +15,7 @@
 #include "revng/CliftImportModel/ImportModel.h"
 #include "revng/CliftPipes/CliftContainer.h"
 #include "revng/CliftPipes/Headers.h"
+#include "revng/Model/Binary.h"
 #include "revng/PTML/CTokenEmitter.h"
 #include "revng/Pipeline/RegisterPipe.h"
 
@@ -50,8 +52,8 @@ static void emitHelperHeaderImpl(llvm::raw_ostream &Out,
 
 static void emitTypeDefinitionImpl(llvm::raw_ostream &Out,
                                    mlir::ModuleOp Module,
-                                   const CDataModel &DataModel,
-                                   const model::TypeDefinition &Type) {
+                                   const model::TypeDefinition &Type,
+                                   const model::Binary &Binary) {
   ptml::CTokenEmitter Tokens(Out, ptml::Tagging::Disabled);
 
   mlir::MLIRContext &Context = *Module.getContext();
@@ -62,12 +64,18 @@ static void emitTypeDefinitionImpl(llvm::raw_ostream &Out,
   auto CliftType = clift::importType(EmitError, &Context, Type);
   revng_check(CliftType != nullptr);
 
+  // FUTURE-WIP: @fez, one more problem with reimporting types - we need to
+  //             reimport names too. Despite the fact that they were *already*
+  //             imported by the previous pipe!
+  clift::importDescriptiveInfo(Binary, Module);
+
   TypeEmitterConfiguration Configuration = {
     .TypeToOmit = {},
     .EmitMaximumEnumValue = true,
     .ExplicitPadding = false,
   };
 
+  const CDataModel &DataModel = clift::getDataModel(Module);
   emitSingleTypeDefinition(Tokens, DataModel, CliftType, Configuration);
 
   Out.flush();
@@ -149,14 +157,14 @@ public:
   void run(pipeline::ExecutionContext &EC,
            const revng::pipes::CliftContainer &CliftContainer,
            TypeDefinitionContainer &ModelTypesContainer) {
+    const model::Binary &Binary = *revng::getModelFromContext(EC);
     mlir::ModuleOp Module = CliftContainer.getModule();
-    auto DataModel = abi::getDataModel(*revng::getModelFromContext(EC));
 
     for (const model::TypeDefinition &Type :
          revng::getTypeDefinitionsAndCommit(EC, ModelTypesContainer.name())) {
       std::string &Result = ModelTypesContainer[Type.key()];
       llvm::raw_string_ostream Out(Result);
-      emitTypeDefinitionImpl(Out, Module, DataModel, Type);
+      emitTypeDefinitionImpl(Out, Module, Type, Binary);
     }
   }
 };
