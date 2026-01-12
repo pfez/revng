@@ -672,7 +672,7 @@ Branches:
               - strip-dead-prototypes
               - split-overflow-intrinsics
               - dce
-      - Name: emit-c
+      - Name: pre-emit-c
         Pipes:
           - Type: llvm-pipe
             UsedContainers: [functions.bc.zstd]
@@ -682,6 +682,8 @@ Branches:
               - peephole-opt-for-decompilation
               - ternary-reduction
               - exit-ssa
+              - arithmetic-to-gep
+              - dce
               - switch-to-statements
               - remove-constant-array-returns
               - dagify
@@ -692,6 +694,22 @@ Branches:
               - inline-divergent-scopes
               - enforce-single-exit
               - materialize-trivial-goto
+        Artifacts:
+          Container: functions.bc.zstd
+          Kind: stack-accesses-segregated
+          SingleTargetFilename: pre-emit-c.ll
+          Docs: |-
+            This artifact contains one LLVM function for each function defined
+            in this binary.
+
+            The output is similar to the output of `make-segment-ref` but it's
+            cleaned up from rev.ng-specific artifacts in order to be more easily
+            consumed as standard LLVM IR.
+
+            This is an appropriate artifact on top of which write analyses, such
+            as a taint analysis.
+      - Name: emit-c
+        Pipes:
           - Type: clifter
             UsedContainers: [functions.bc.zstd, functions.mlir]
           - Type: clift-optimization
