@@ -88,6 +88,8 @@ public:
     CurrentModule(Module),
     Model(Model),
     Builder(Context),
+    // FIXME TODO: use the pointer size of the data layout
+    // we'll have to add pointer extension and truncation
     PointerSize(getPointerSize(Model.Architecture())) {
     revng_assert(clift::hasModuleAttr(Module));
     Builder.setInsertionPointToEnd(Module.getBody());
@@ -1283,6 +1285,7 @@ private:
     if (auto I = llvm::dyn_cast<llvm::FreezeInst>(V))
       rc_return emitExpression(I->getOperand(0), getLocation(I));
 
+    V->dump();
     revng_abort("Unsupported LLVM instruction.");
   }
 
