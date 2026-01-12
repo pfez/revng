@@ -1114,9 +1114,8 @@ private:
         revng_assert(NumBits == 1 or (NumBits % 8 == 0));
         ByteSize = (NumBits == 1) ? 1 : (NumBits / 8);
       } else {
-        ByteSize = getPointerSize(Model.Architecture());
+        ByteSize = I->getModule()->getDataLayout().getPointerSize();
       }
-
       return model::PrimitiveType::make(model::PrimitiveKind::Generic,
                                         ByteSize);
     }
