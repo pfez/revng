@@ -272,8 +272,17 @@ static bool causesExponentialDataflowPaths(const Instruction *I) {
   return false;
 }
 
-static bool isStatement(const Instruction *I) {
-  return causesExponentialDataflowPaths(I) or I->mayHaveSideEffects();
+static bool hasSideEffects(const Instruction *I) {
+  // TODO: this is a workaround. This should be split up in a separate pass to
+  // run before SwitchToStatements.
+  if (causesExponentialDataflowPaths(I))
+    return true;
+
+  if (I->mayHaveSideEffects()) {
+    revng_assert(isa<StoreInst>(I) or isa<CallInst>(I));
+    return true;
+  }
+  return false;
 }
 
 static bool mayReadMemory(const llvm::Instruction &I) {
@@ -717,8 +726,8 @@ void AEMFP<IsLegacy>::applyTransferFunctionImpl(Instruction *I,
                  and not isCallToTagged(I, FunctionTags::Assign));
   }
 
-  if (isStatement(I)) {
-    revng_log(Log, "isStatement");
+  if (hasSideEffects(I)) {
+    revng_log(Log, "hasSideEffects");
     LoggerIndent XX{ Log };
     for (const AvailableExpression &A : llvm::make_early_inc_range(E)) {
       const auto &[Available, Assign] = A;
@@ -853,7 +862,8 @@ static bool isProgramPoint(const Instruction *I) {
     revng_abort("Unexpected Instruction");
   }
 
-  return I == &I->getParent()->front() or isStatement(I) or mayReadMemory(*I);
+  return I == &I->getParent()->front() or hasSideEffects(I)
+         or mayReadMemory(*I);
 }
 
 template<bool IsLegacy>
@@ -1167,6 +1177,9 @@ private:
 
   bool serialize(llvm::Instruction *I) {
     LoggerIndent Indent{ Log };
+    // FIXME TODO: can we assert `isSerializable(*I)` instead??
+    // this is very likely to be feasible in the clift-based pipeline, if we
+    // allow SwitchToStatement to deal with non-scalar instructions.
     if (isSerializable(*I)) {
       revng_log(Log, "serialize(I), I: " << dumpToString(I));
       Picked.ToSerialize.insert(I);
@@ -1190,14 +1203,61 @@ private:
     // First, pick all the statements amenable for serialization
     // Also compute the program order of instructions.
     {
-      revng_log(Log, "pick statements: " << F.getName().str());
+      revng_log(Log,
+                "pick for serialization instructions with hasSideEffects: "
+                  << F.getName().str());
       LoggerIndent MoreIndent{ Log };
       size_t NextOrder = 0;
       for (BasicBlock *BB : RPO) {
         for (Instruction &I : *BB) {
-          if (isStatement(&I) and isSerializable(I) and I.getNumUses() != 0)
-            serialize(&I);
           ProgramOrdering[&I] = NextOrder++;
+
+          if (not hasSideEffects(&I))
+            continue;
+
+          // If it's a statement we have to check if it can be serialized, and
+          // potentially do it.
+
+          // If it's a statement but it's not serializable we can't pick it.
+          // Later parts of the pipeline will have to know about this.
+          // FIXME TODO
+          // In particular, in the new pipeline, the Clifter will have to match
+          // these and emit local variables on the fly for them.
+          // Currently, non serializable statements are:
+          // * calls returning void on LLVM IR
+          // * calls returning aggregates on LLVM IR, used for RFD, returning
+          //   register sets. they always define a local variable in C, but that
+          //   variable gets emitted on the fly by the clifter.
+          // * not clear what happens with SPTAR
+          // * opaque functions tagged with IsRef (not relevant for clifter)
+          // FIXME TODO
+          //   probably the best thing to do in the long term is drop the
+          //   special case on aggregates, that was basically there only for
+          //   limitations of the old pipeline.
+          //   when that happens. we can just check for void here, and serialize
+          //   even non-scalar instructions.
+          if (not isSerializable(I))
+            continue;
+
+          // In principle, we could always serialize to a local variable here.
+          // But in the new clift based pipeline, serializing instructions that
+          // have 0 uses is detrimental, since it ends up generating local
+          // variables with 0 uses. So we don't do that.
+          // TODO: the fact that we don't serialize these means that they will
+          // not end up in any local variable for potential reuse, but on the
+          // other hand they already have 0 uses, so we don't care.
+          if (not IsLegacy and I.hasNUses(0))
+            continue;
+
+          // FIXME, if I is a call that reads and writes memory, but has only
+          // one use, we may want to not serialize it and inline it in the use.
+          // This will probably happen often.
+          // Any such call can be modeled as a write followed by a read, such
+          // that the write aliases everything except local variables that don't
+          // escape.
+          // Inlining it would have the effect of postponing a write, which is
+          // something that we haven't ever considered to do.
+          serialize(&I);
         }
       }
     }
@@ -1228,14 +1288,15 @@ private:
 
     // If I has no uses, we are done, and there's no reason to require the
     // serialization of MemoryRead before I.
-    if (not I->getNumUses()) {
+    if (not IsLegacy and I->hasNUses(0)) {
       revng_log(Log, "I has no uses");
       rc_return false;
     }
 
-    // If it's a statement we must have already picked it. Just return false.
-    if (isStatement(I)) {
-      revng_log(Log, "I isStatement");
+    // If it has side effects, we must have already picked it. Just return
+    // false.
+    if (hasSideEffects(I)) {
+      revng_log(Log, "I hasSideEffects");
       revng_assert(not isSerializable(*I) or isPickedToSerialize(I));
       rc_return false;
     }
@@ -1617,24 +1678,22 @@ bool VI<IsLegacy>::shouldReplaceUseWithCopies(const Instruction *I,
   if (not Call)
     return true;
 
-  const auto *ProtoT = getCallSitePrototype(Model, cast<CallInst>(I));
-  abi::FunctionType::Layout Layout = abi::FunctionType::Layout::make(*ProtoT);
-
-  // If the Isolated function doesn't return an aggregate, we have to
-  // inject copies from local variables.
-  if (Layout.returnMethod() != abi::FunctionType::ReturnMethod::ModelAggregate)
-    return true;
-
-  unsigned NumUses = I->getNumUses();
-
-  // SPTAR return aggregates also need copies from local variables,
-  // because they are emitted as scalar pointer variables in C.
-  if (Layout.hasSPTAR()) {
-    revng_assert(0 == NumUses);
-    return true;
-  }
-
   if constexpr (IsLegacy) {
+
+    const auto *ProtoT = getCallSitePrototype(Model, cast<CallInst>(I));
+    abi::FunctionType::Layout Layout = abi::FunctionType::Layout::make(*ProtoT);
+
+    // If the Isolated function doesn't return an aggregate, we have to
+    // inject copies from local variables.
+    using namespace abi::FunctionType;
+    if (Layout.returnMethod() != ReturnMethod::ModelAggregate)
+      return true;
+
+    // SPTAR return aggregates also need copies from local variables,
+    // because they are emitted as scalar pointer variables in C.
+    if (Layout.hasSPTAR())
+      return true;
+
     // Non-SPTAR return aggregates, in legacy mode, are special in many ways:
     // 1. they basically imply a LocalVariable;
     // 2. their only expected use is supposed to be in custom opcodes that
@@ -1649,18 +1708,9 @@ bool VI<IsLegacy>::shouldReplaceUseWithCopies(const Instruction *I,
     revng_assert(1 == U.getOperandNo());
     revng_assert(isCallToTagged(U.getUser(), FunctionTags::AddressOf)
                  or isCallToTagged(U.getUser(), FunctionTags::ModelGEPRef));
-  } else {
-    // Non-SPTAR return aggregates expect at most a single use, which is an
-    // assignment of their value into a local variable.
-    revng_assert(NumUses < 2);
-    if (NumUses) {
-      const Use &OnlyUse = *I->uses().begin();
-      revng_assert(isa<StoreInst>(OnlyUse.getUser()));
-      unsigned OpNum = OnlyUse.getOperandNo();
-      revng_assert(OpNum != StoreInst::getPointerOperandIndex());
-    }
+    return false;
   }
-  return false;
+  return true;
 }
 
 template<bool IsLegacy>
@@ -1673,23 +1723,24 @@ bool VI<IsLegacy>::serializeToLocalVariable(Instruction *I) {
   revng_assert(I->getType()->isIntOrPtrTy());
   const model::UpcastableType &VariableType = getModelType(I);
 
-  const llvm::DataLayout &DL = I->getModule()->getDataLayout();
-  auto ModelSize = VariableType->size().value();
-  auto *IType = I->getType();
-  auto IRSize = DL.getTypeStoreSize(IType);
-  if (ModelSize < IRSize) {
-    revng_assert(IType->isPointerTy());
-    using model::Architecture::getPointerSize;
-    auto PtrSize = getPointerSize(Model.Architecture());
-    revng_assert(ModelSize == PtrSize);
-  } else if (ModelSize > IRSize) {
-    auto &Prototype = *getCallSitePrototype(Model, cast<CallInst>(I));
-    using namespace abi::FunctionType;
-    abi::FunctionType::Layout Layout = Layout::make(Prototype);
-    revng_assert(Layout.returnMethod() == ReturnMethod::ModelAggregate);
-    if (Layout.hasSPTAR())
-      revng_assert(0 == I->getNumUses());
-  }
+  // FIXME TODO drop this
+  // const llvm::DataLayout &DL = I->getModule()->getDataLayout();
+  // auto ModelSize = VariableType->size().value();
+  // auto *IType = I->getType();
+  // auto IRSize = DL.getTypeStoreSize(IType);
+  // if (ModelSize < IRSize) {
+  //   revng_assert(IType->isPointerTy());
+  //   using model::Architecture::getPointerSize;
+  //   auto PtrSize = getPointerSize(Model.Architecture());
+  //   revng_assert(ModelSize == PtrSize);
+  // } else if (ModelSize > IRSize) {
+  //   auto &Prototype = *getCallSitePrototype(Model, cast<CallInst>(I));
+  //   using namespace abi::FunctionType;
+  //   abi::FunctionType::Layout Layout = Layout::make(Prototype);
+  //   revng_assert(Layout.returnMethod() == ReturnMethod::ModelAggregate);
+  //   if (Layout.hasSPTAR())
+  //     revng_assert(0 == I->getNumUses());
+  // }
 
   // First, we have to declare the LocalVariable, always at the entry block.
   // Create instruction that allocates a LocalVariable
@@ -1705,7 +1756,7 @@ bool VI<IsLegacy>::serializeToLocalVariable(Instruction *I) {
     revng_assert(isa<Instruction>(U.getUser()));
 
     llvm::Instruction *ValueToUse = LocalVariable;
-    if (shouldReplaceUseWithCopies(I, U)) {
+    if (not IsLegacy or shouldReplaceUseWithCopies(I, U)) {
       ValueToUse = LocalVariableBuilder.createCopyOnUse(LocalVariable, U);
     }
     U.set(ValueToUse);
