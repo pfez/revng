@@ -284,6 +284,27 @@ makeVariableBuilder(const model::Binary &Binary,
   }
 }
 
+struct PointersMetadata {
+  llvm::SmallVector<bool> ReturnValues;
+  llvm::SmallVector<bool> Arguments;
+};
+
+static PointersMetadata getPointerMetadata(const abi::FunctionType::Layout &L) {
+  PointersMetadata Result;
+
+  // FIXME TODO what do about SPTAR??
+
+  llvm::SmallVector<bool> PointerReturns;
+  for (const auto &R : L.ReturnValues)
+    Result.ReturnValues.push_back(R.Type->isPointer());
+
+  llvm::SmallVector<bool> PointerArguments;
+  for (const auto &R : L.Arguments)
+    Result.Arguments.push_back(R.Type->isPointer());
+
+  return Result;
+}
+
 /// Rewrite all stack memory accesses
 ///
 /// This pass changes the base address of stack memory access to either:
@@ -1168,6 +1189,8 @@ private:
     CallInst *NewCall = B.CreateCall(CalleeType, CalledValue, Arguments);
     NewCall->copyMetadata(*OldCall);
     NewCall->setAttributes(OldCall->getAttributes());
+    const auto &[PointerReturns, PointerArguments] = getPointerMetadata(Layout);
+    setPointersMetadata(NewCall, PointerReturns, PointerArguments);
 
     switch (Layout.returnMethod()) {
     case ReturnMethod::ModelAggregate: {
@@ -1461,6 +1484,8 @@ private:
 
     // Create the new function, stealing the name
     Function &NewFunction = recreateWithoutBody(*OldFunction, NewType);
+    const auto &[PointerReturns, PointerArguments] = getPointerMetadata(Layout);
+    setPointersMetadata(&NewFunction, PointerReturns, PointerArguments);
 
     // Record the old-to-new mapping
     OldToNew[OldFunction] = &NewFunction;
