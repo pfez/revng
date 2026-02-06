@@ -770,8 +770,48 @@ private:
   }
 };
 
+static bool foldPointerCasts(llvm::Function &F) {
+  using WTVH = llvm::WeakTrackingVH;
+  llvm::SmallVector<WTVH, 8> Dead;
+
+  for (llvm::Instruction &I : llvm::instructions(F)) {
+
+    if (auto *PtrToInt = dyn_cast<llvm::PtrToIntInst>(&I)) {
+      for (auto &U : PtrToInt->uses()) {
+
+        if (auto *IntToPtr = dyn_cast<llvm::IntToPtrInst>(U.getUser())) {
+          llvm::Value *Pointer = PtrToInt->getOperand(0);
+          if (Pointer->getType() != IntToPtr->getType())
+            continue;
+
+          IntToPtr->replaceAllUsesWith(Pointer);
+          Dead.push_back(IntToPtr);
+        }
+      }
+
+    } else if (auto *IntToPtr = dyn_cast<llvm::IntToPtrInst>(&I)) {
+      for (auto &U : IntToPtr->uses()) {
+
+        if (auto *PtrToInt = dyn_cast<llvm::PtrToIntInst>(U.getUser())) {
+          llvm::Value *Integer = IntToPtr->getOperand(0);
+          if (Integer->getType() != PtrToInt->getType())
+            continue;
+
+          PtrToInt->replaceAllUsesWith(Integer);
+          Dead.push_back(PtrToInt);
+        }
+      }
+    }
+  }
+
+  RecursivelyDeleteTriviallyDeadInstructionsPermissive(Dead);
+
+  return not Dead.empty();
+}
+
 class GEPRewriter {
 private:
+  llvm::Function &F;
   revng::NonDebugInfoCheckingIRBuilder B;
 
   // Collect all the llvm::Values that had at least one of their uses changed
@@ -783,11 +823,12 @@ private:
     HadUsesReplaced;
 
 public:
-  GEPRewriter(llvm::LLVMContext &C) : B{ C } {}
+  GEPRewriter(llvm::Function &F) : F{ F }, B{ F.getContext() } {}
 
   ~GEPRewriter() {
     llvm::SmallVector<llvm::WeakTrackingVH> R = HadUsesReplaced.takeVector();
     RecursivelyDeleteTriviallyDeadInstructionsPermissive(R);
+    foldPointerCasts(F);
   }
 
 public:
@@ -965,70 +1006,6 @@ static void crashOnPHINode(const llvm::Function &F) {
   }
 }
 
-static bool foldPointerCasts(llvm::Function &F) {
-  using WTVH = llvm::WeakTrackingVH;
-  llvm::SmallVector<WTVH, 8> Dead;
-
-  for (llvm::Instruction &I : llvm::instructions(F)) {
-    if (auto *PtrToInt = dyn_cast<llvm::PtrToIntInst>(&I)) {
-      revng_log(FindLog, "PTRTOINT: " << dumpToString(PtrToInt));
-      LoggerIndent X{FindLog};
-      for (auto &U : PtrToInt->uses()) {
-
-        if (auto *IntToPtr = dyn_cast<llvm::IntToPtrInst>(U.getUser())) {
-          revng_log(FindLog, "INTTOPTR: " << dumpToString(IntToPtr));
-
-          llvm::Value *Pointer = PtrToInt->getOperand(0);
-            Pointer->getType()->dump();
-            IntToPtr->getType()->dump();
-
-          if (Pointer->getType() != IntToPtr->getType()) {
-            revng_log(FindLog, "not replaced");
-            continue;
-          }
-
-          revng_log(FindLog, "Replace INTTOPTR with:");
-          Pointer->dump();
-
-          IntToPtr->replaceAllUsesWith(Pointer);
-          Dead.push_back(IntToPtr);
-        }
-
-      }
-    } else if (auto *IntToPtr = dyn_cast<llvm::IntToPtrInst>(&I)) {
-
-      revng_log(FindLog, "INTTOPTR: " << dumpToString(IntToPtr));
-      LoggerIndent X{FindLog};
-
-      for (auto &U : IntToPtr->uses()) {
-
-        if (auto *PtrToInt = dyn_cast<llvm::PtrToIntInst>(U.getUser())) {
-          revng_log(FindLog, "PTRTOINT: " << dumpToString(PtrToInt));
-
-          llvm::Value *Integer = IntToPtr->getOperand(0);
-            Integer->getType()->dump();
-            PtrToInt->getType()->dump();
-
-          if (Integer->getType() != PtrToInt->getType()) {
-            revng_log(FindLog, "not replaced");
-            continue;
-          }
-
-          revng_log(FindLog, "Replace PTRTOINT with:");
-          Integer->dump();
-
-          PtrToInt->replaceAllUsesWith(Integer);
-          Dead.push_back(PtrToInt);
-        }
-      }
-    }
-  }
-
-  RecursivelyDeleteTriviallyDeadInstructionsPermissive(Dead);
-
-  return not Dead.empty();
-}
-
 bool ArithmeticToGEPPass::runOnFunction(llvm::Function &F) {
 
   crashOnPHINode(F);
@@ -1039,7 +1016,7 @@ bool ArithmeticToGEPPass::runOnFunction(llvm::Function &F) {
   if (Pointers.empty())
     return false;
 
-  GEPRewriter Rewriter(F.getContext());
+  GEPRewriter Rewriter(F);
 
   std::set<const LocalValue<>> Replaced;
   for (const LocalValue<> &PointerValue : Pointers) {
@@ -1052,8 +1029,6 @@ bool ArithmeticToGEPPass::runOnFunction(llvm::Function &F) {
 
     Rewriter.replace(PointerValue);
   }
-
-  foldPointerCasts(F);
 
   return true;
 
