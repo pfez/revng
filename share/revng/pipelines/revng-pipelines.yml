@@ -683,7 +683,6 @@ Branches:
               - ternary-reduction
               - exit-ssa
               - arithmetic-to-gep
-              - dce
               - switch-to-statements
               - remove-constant-array-returns
               - dagify

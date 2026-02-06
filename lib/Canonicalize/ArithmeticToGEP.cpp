@@ -20,13 +20,17 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/IR/Value.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/InstructionCost.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
 #include "revng/ADT/EagerMaterializationRangeIterator.h"
@@ -39,7 +43,9 @@ using llvm::cast;
 using llvm::dyn_cast;
 using llvm::isa;
 
-static constexpr const char *ArithToGEPFlag = "arithmetic-to-gep";
+static constexpr const char *ArithmeticToGEPFlag = "arithmetic-to-gep";
+
+static Logger FindLog{ "arithmetic-to-gep-find-pointers" };
 
 struct ArithmeticToGEPPass : public llvm::FunctionPass {
 public:
@@ -169,9 +175,12 @@ static bool isNthReturnValueModelPointer(const llvm::Function *F,
   // FIXME TODO: this should handle SPTAR too. make sure it does.
   std::optional<llvm::SmallVector<bool>>
     PointerReturnValues = getPointerValuesMetadata(F);
-  revng_assert(PointerReturnValues.has_value());
-  revng_assert(ReturnValueIndex < PointerReturnValues.value().size());
-  return PointerReturnValues.value()[ReturnValueIndex];
+  // The metadata can be missing, if F doesn't represent a model::Function nor a
+  // model::DynamicFunction. Otherwise it must be well formed.
+  revng_assert(not PointerReturnValues.has_value()
+               or ReturnValueIndex < PointerReturnValues.value().size());
+  return PointerReturnValues.has_value()
+         and PointerReturnValues.value()[ReturnValueIndex];
 }
 
 static bool isNthReturnValueModelPointer(const llvm::CallInst *Call,
@@ -182,9 +191,13 @@ static bool isNthReturnValueModelPointer(const llvm::CallInst *Call,
 
   std::optional<llvm::SmallVector<bool>>
     PointerReturnValues = getPointerValuesMetadata(Call);
+  // The metadata cannot be missing, because this is an indirect call, and
+  // indirect calls can only call llvm::Functions that represent something
+  // coming from the binary, hence the metadata must be there.
   revng_assert(PointerReturnValues.has_value());
   revng_assert(ReturnValueIndex < PointerReturnValues.value().size());
-  return PointerReturnValues.value()[ReturnValueIndex];
+  return PointerReturnValues.has_value()
+         and PointerReturnValues.value()[ReturnValueIndex];
 }
 
 static bool isExtractedValueModelPointer(const llvm::Value &V) {
@@ -213,6 +226,10 @@ static bool isPointer(const llvm::Value &V) {
     return isExtractedValueModelPointer(V);
 
   return false;
+}
+
+static bool isPointer(const llvm::Use &U) {
+  return isPointer(*U.get());
 }
 
 //
@@ -291,9 +308,17 @@ static bool isLocal(const llvm::Value *V) {
   return isa<llvm::Instruction>(V) or isa<llvm::Argument>(V);
 }
 
+[[maybe_unused]] static bool isLocal(const llvm::Use *U) {
+  return isLocal(U->get());
+}
+
 static bool isGlobal(const llvm::Value *V) {
-  return isa<llvm::ConstantInt>(V) or isa<llvm::Function>(V)
-         or isa<llvm::GlobalVariable>(V);
+  return isa<llvm::Function>(V) or isa<llvm::GlobalVariable>(V)
+         or isa<llvm::Constant>(V);
+}
+
+static bool isGlobal(const llvm::Use *U) {
+  return isGlobal(U->get());
 }
 
 //
@@ -327,6 +352,7 @@ class LocalValue {
 public:
   using ValueType = std::conditional_t<IsConst, const llvm::Value, llvm::Value>;
   using UseType = std::conditional_t<IsConst, const llvm::Use, llvm::Use>;
+  using UserType = std::conditional_t<IsConst, const llvm::User, llvm::User>;
   using UseIterator = std::conditional_t<IsConst,
                                          llvm::Value::const_use_iterator,
                                          llvm::Value::user_iterator>;
@@ -339,10 +365,33 @@ private:
   UseType *WrappedUse;
 
 public:
+  bool verify() const {
+    if (WrappedUse) {
+      // If the Use is not null, so must be the Value, and it must be a global,
+      // and the Use must be using V.
+      return WrappedValue and isGlobal(WrappedValue)
+             and WrappedUse->get() == WrappedValue;
+    }
+
+    if (WrappedValue) {
+      // If the Value is not null, and the Use is missing, the Value must be a
+      // local.
+      return isLocal(WrappedValue);
+    }
+
+    return true;
+  }
+
+private:
+  LocalValue(ValueType *V, UseType *U) : WrappedValue(V), WrappedUse(U) {
+    revng_assert(this->verify());
+  }
+
+public:
   // No need to mark this explicit. Initializing from nullptr explicitly is
   // never ambiguous and can never lead to problems.
   // All other constructors are marked as explicit because they verify
-  LocalValue(nullptr_t) : WrappedValue(nullptr), WrappedUse(nullptr) {}
+  LocalValue(nullptr_t) : LocalValue(nullptr, nullptr) {}
   LocalValue() : LocalValue(nullptr) {}
 
 public:
@@ -395,17 +444,9 @@ public:
   }
 
 public:
-  LocalValue(ValueType *V) : WrappedValue(V), WrappedUse(nullptr) {
-    // Ensure this is only called on local values.
-    revng_assert(not WrappedValue or isLocal(WrappedValue));
-  }
-
-  LocalValue(UseType *U) : WrappedValue(U ? U->get() : nullptr), WrappedUse(U) {
-    // Ensure this is only called on global values values.
-    revng_assert(not WrappedValue
-                 or (isGlobal(WrappedValue) and WrappedUse
-                     and isLocal(WrappedUse->getUser())));
-  }
+  LocalValue(ValueType *V) : LocalValue(V, nullptr) {}
+  LocalValue(UseType *U) :
+    LocalValue(U ? U->get() : nullptr, (U and isGlobal(U)) ? U : nullptr) {}
 
 public:
   friend std::strong_ordering operator<=>(const LocalValue &LHS,
@@ -435,17 +476,26 @@ public:
     return Result;
   }
 
-  llvm::SmallVector<LocalValue<IsConst>, 2> operands() const {
+  llvm::SmallVector<LocalValue<IsConst>, 2> maybePointerOperands() const {
     llvm::SmallVector<LocalValue<IsConst>, 2> Result;
 
     if (WrappedUse)
       return Result;
 
-    llvm::transform(WrappedValue->operands(),
-                    std::back_inserter(Result),
-                    [this](UseType *Op) {
-                      return LocalValue<IsConst>(Op->get());
-                    });
+    if (not isLocal(WrappedValue))
+      return Result;
+
+    if (auto *WrappedUserValue = dyn_cast<UserType>(WrappedValue)) {
+
+      static constexpr auto UseToLocalValue = [](UseType &Operand) {
+        return LocalValue<IsConst>(&Operand);
+      };
+
+      llvm::transform(llvm::make_filter_range(WrappedUserValue->operands(),
+                                              hasDataflowToPointerOperand),
+                      std::back_inserter(Result),
+                      UseToLocalValue);
+    }
 
     return Result;
   }
@@ -453,7 +503,65 @@ public:
 public:
   ValueType *value() const { return WrappedValue; }
 
+  UseType *use() const { return WrappedUse; }
+
   llvm::Type *getType() const { return WrappedValue->getType(); }
+
+private:
+  static bool hasDataflowToPointerOperand(UseType &OperandUse) {
+
+    ValueType *Operand = OperandUse.get();
+    UserType *User = OperandUse.getUser();
+
+    if (isa<llvm::Constant>(User))
+      return false;
+
+    if (auto *I = dyn_cast<llvm::Instruction>(User)) {
+      revng_assert(not I->isTerminator());
+      switch (I->getOpcode()) {
+
+      case llvm::Instruction::PHI:
+        return not isa<llvm::BlockAddress>(Operand);
+
+      case llvm::Instruction::Freeze:
+      case llvm::Instruction::IntToPtr:
+      case llvm::Instruction::PtrToInt:
+      case llvm::Instruction::BitCast:
+        return true;
+
+      case llvm::Instruction::Add:
+        return true;
+
+      case llvm::Instruction::Sub:
+        return OperandUse.getOperandNo() == 0;
+
+      case llvm::Instruction::GetElementPtr:
+        return OperandUse.getOperandNo() == 0;
+
+      case llvm::Instruction::AShr:
+      case llvm::Instruction::LShr:
+      case llvm::Instruction::Shl:
+        return OperandUse.getOperandNo() == 0;
+
+      case llvm::Instruction::Select:
+        return OperandUse.getOperandNo() != 0;
+
+      case llvm::Instruction::Alloca:
+      case llvm::Instruction::Load:
+      case llvm::Instruction::Store:
+      case llvm::Instruction::Mul:
+      case llvm::Instruction::SDiv:
+      case llvm::Instruction::UDiv:
+      case llvm::Instruction::SRem:
+      case llvm::Instruction::URem:
+      case llvm::Instruction::ICmp:
+      default:
+        return false;
+      }
+    }
+
+    return false;
+  }
 };
 
 //
@@ -506,6 +614,10 @@ LocalValue(ConstUse *U) -> LocalValue</*IsConst*/ true>;
 template<MutableDerivedFromUse MutableUse>
 LocalValue(MutableUse *U) -> LocalValue</*IsConst*/ false>;
 
+//
+// Graph traits for LocalValue
+//
+
 template<bool IsConst>
 struct llvm::GraphTraits<LocalValue<IsConst>> {
 
@@ -523,7 +635,6 @@ public:
 
 public:
   static NodeRef getEntryNode(NodeRef V) {
-    revng_abort("getEntryNode on LocalValue dataflow graph");
     return LocalValue<IsConst>{ nullptr };
   }
 };
@@ -538,77 +649,155 @@ public:
   using ChildIteratorType = EagerRange;
 
 public:
-  static ChildIteratorType child_begin(NodeRef N) { return { N.operands() }; }
+  static ChildIteratorType child_begin(NodeRef N) {
+    return { N.maybePointerOperands() };
+  }
 
   static ChildIteratorType child_end(NodeRef N) { return { { nullptr } }; }
 
 public:
   static NodeRef getEntryNode(NodeRef V) {
-    revng_abort("getEntryNode on Inverse<LocalValue> dataflow graph");
     return LocalValue<IsConst>{ nullptr };
   }
 };
 
-static llvm::SmallVector<LocalValue<>, 2> getLocalPointers(llvm::Function &F) {
-  llvm::SetVector<LocalValue<>,
-                  llvm::SmallVector<LocalValue<>, 2>,
-                  llvm::SmallSet<LocalValue<>, 2>>
-    LocalPointers;
-  for (llvm::Instruction &I : llvm::instructions(F)) {
-    for (llvm::Use &U : I.operands()) {
-      if (isPointerUse(U)) {
-        if (isGlobal(U.get()))
-          LocalPointers.insert(LocalValue<>{ &U });
-        else if (isLocal(U.get()))
-          LocalPointers.insert(LocalValue<>{ U.get() });
+class PointersFinder {
+  llvm::ModuleSlotTracker MST;
+
+public:
+  PointersFinder(llvm::Function &F) : MST(F.getParent()) {}
+
+  llvm::SmallVector<LocalValue<>> findPointers(llvm::Function &F) {
+    llvm::SmallVector<LocalValue<>> Result;
+    Result = findObviousPointers(F);
+    Result.append(findLikelyPointers(F));
+    return Result;
+  }
+
+private:
+  llvm::SmallVector<LocalValue<>, 2> findObviousPointers(llvm::Function &F) {
+    revng_log(FindLog, "findPointers: " << F.getName());
+    LoggerIndent Indent{ FindLog };
+
+    llvm::SetVector<LocalValue<>,
+                    llvm::SmallVector<LocalValue<>, 2>,
+                    llvm::SmallSet<LocalValue<>, 2>>
+      LocalPointers;
+
+    for (llvm::Argument &A : F.args()) {
+      if (isPointer(A)) {
+        revng_log(FindLog, "Pointer Argument: " << dumpToString(A, MST));
+        LocalPointers.insert(&A);
       }
     }
-  }
-  return LocalPointers.takeVector();
-}
 
-static llvm::SmallVector<llvm::Use *> snapshotUses(llvm::Instruction *V) {
-  llvm::SmallVector<llvm::Use *> Uses;
-  const auto ToPointer = [](llvm::Use &U) { return &U; };
-  llvm::transform(V->uses(), std::back_inserter(Uses), ToPointer);
-  return Uses;
-}
+    for (llvm::Instruction &I : llvm::instructions(F)) {
+      if (isPointer(I)) {
+        revng_log(FindLog, "Pointer Instruction: " << dumpToString(I, MST));
+        LocalPointers.insert(&I);
+      }
+    }
 
-static llvm::GetElementPtrInst *makeGEP(revng::NonDebugInfoCheckingIRBuilder &B,
-                                        llvm::Value *Base,
-                                        llvm::Value *Offset) {
-
-  if (not Base->getType()->isPointerTy()) {
-    revng_assert(Base->getType()->isIntegerTy());
-    B.CreateIntToPtr(Base, llvm::PointerType::get(B.getContext(), 0));
+    return LocalPointers.takeVector();
   }
 
-  auto *GEP = B.CreateGEP(llvm::IntegerType::getInt8Ty(B.getContext()),
-                          Base,
-                          Offset);
-  return cast<llvm::GetElementPtrInst>(GEP);
-}
+  llvm::SmallVector<LocalValue<>, 2> findLikelyPointers(llvm::Function &F) {
+    revng_log(FindLog, "findLikelyPointers: " << F.getName());
+    LoggerIndent Indent{ FindLog };
+
+    llvm::DenseSet<llvm::Use *> PointerUses;
+    {
+      revng_log(FindLog, "Initial pointer uses");
+      LoggerIndent Indent{ FindLog };
+      for (llvm::Instruction &I : llvm::instructions(F)) {
+        for (llvm::Use &U : I.operands()) {
+          if (isPointer(U) or isPointerUse(U)) {
+            revng_log(FindLog, "Instruction: " << dumpToString(I, MST));
+            LoggerIndent IndentI{ FindLog };
+            revng_log(FindLog,
+                      "has pointer operand: " << dumpToString(*U, MST));
+            PointerUses.insert(&U);
+          }
+        }
+      }
+    }
+
+    llvm::SetVector<LocalValue<>,
+                    llvm::SmallVector<LocalValue<>, 2>,
+                    llvm::SmallSet<LocalValue<>, 2>>
+      UsedAsPointers;
+
+    revng_log(FindLog, "Propagate pointer uses backwards");
+    {
+      LoggerIndent IndentPropagation{ FindLog };
+
+      for (llvm::Use *U : PointerUses) {
+        llvm::SmallVector<LocalValue<>, 8> Worklist;
+        if (LocalValue<> LV{ U }; UsedAsPointers.insert(LV))
+          Worklist.push_back(LV);
+
+        while (not Worklist.empty()) {
+          LocalValue<> LV = Worklist.pop_back_val();
+
+          revng_log(FindLog,
+                    "Considering value:" << dumpToString(*LV.value(), MST));
+          if (LV.use())
+            revng_log(FindLog,
+                      "used in:" << dumpToString(*LV.use()->getUser(), MST));
+
+          LoggerIndent IndentOperands{ FindLog };
+
+          for (LocalValue<> O : LV.maybePointerOperands()) {
+            if (UsedAsPointers.insert(O)) {
+              revng_log(FindLog,
+                        "found new pointer operand: "
+                          << dumpToString(*O.value(), MST));
+              Worklist.push_back(O);
+            }
+          }
+        }
+      }
+    }
+
+    if (FindLog.isEnabled()) {
+      for (LocalValue<> LV : UsedAsPointers) {
+        revng_log(FindLog,
+                  "value used as pointer: " << dumpToString(*LV.value(), MST));
+      }
+    }
+
+    return UsedAsPointers.takeVector();
+  }
+};
 
 class GEPRewriter {
 private:
   revng::NonDebugInfoCheckingIRBuilder B;
 
+  // Collect all the llvm::Values that had at least one of their uses changed
+  // across all calls to replace().
+  // This is useful to call DCE in the destructor, given that any of those can
+  // now be dead code.
+  using WTVH = llvm::WeakTrackingVH;
+  llvm::SetVector<WTVH, llvm::SmallVector<WTVH, 8>, llvm::SmallSet<WTVH, 8>>
+    HadUsesReplaced;
+
 public:
   GEPRewriter(llvm::LLVMContext &C) : B{ C } {}
 
-public:
-  void replace(LocalValue<> LV) {
-    llvm::Value *PointerValue = LV.value();
+  ~GEPRewriter() {
+    llvm::SmallVector<llvm::WeakTrackingVH> R = HadUsesReplaced.takeVector();
+    RecursivelyDeleteTriviallyDeadInstructionsPermissive(R);
+  }
 
-    if (not LV.getType()->isPointerTy()) {
-      setInsertPointAfter(LV);
-      PointerValue = B.CreateIntToPtr(PointerValue,
-                                      llvm::PointerType::get(B.getContext(),
-                                                             0));
-    }
+public:
+  bool replace(LocalValue<> LV) {
+    bool Changed = false;
 
     for (llvm::Use *U : LV.uses())
-      replaceImpl(U, PointerValue);
+      Changed |= rc_eval(replaceImpl(U, LV.value()));
+
+    return Changed;
   }
 
 private:
@@ -648,8 +837,57 @@ private:
     }
   }
 
-  RecursiveCoroutine<void> replaceImpl(llvm::Use *U, llvm::Value *BasePointer) {
+  llvm::Instruction *replaceAddWithGEP(llvm::Use *PointerOperandInAdd,
+                                       llvm::Value *BasePointer) {
+
+    auto *Add = cast<llvm::Instruction>(PointerOperandInAdd->getUser());
+    revng_assert(Add->getOpcode() == llvm::Instruction::Add);
+    B.SetInsertPoint(Add);
+
+    unsigned PointerOpIndex = PointerOperandInAdd->getOperandNo();
+    unsigned OffsetOpIndex = PointerOpIndex == 0 ? 1 : 0;
+    auto *Offset = Add->getOperand(OffsetOpIndex);
+
+    auto *Pointer = PointerOperandInAdd->get();
+    if (Pointer != BasePointer) {
+      // We have traversed a bunch of casts, so that Pointer is obtained from
+      // BasePointer via just casts.
+      // What we want to do here is to make use BasePointer as pointer operand
+      // of the GEP we're going to create.
+      // It might be necessary to add a IntToPtr cast first.
+      Pointer = BasePointer;
+    }
+
+    auto *PointerType = llvm::PointerType::get(B.getContext(), 0);
+    auto *IntToPtr = B.CreateIntToPtr(Pointer, PointerType);
+
+    auto *Int8 = llvm::IntegerType::getInt8Ty(B.getContext());
+    auto *GEP = B.CreateGEP(Int8, IntToPtr, Offset);
+
+    // FIXME TODO potrei fare di meglio qui, tipo creare la PtrToInt solo quando
+    // necessario, cioè solo sugli usi che non sono inttoptr. ma in pratica
+    // anche se non lo faccio
+    auto *AddType = Add->getType();
+    auto *GEPToInt = cast<llvm::Instruction>(B.CreatePtrToInt(GEP, AddType));
+
+    Add->replaceAllUsesWith(GEPToInt);
+    HadUsesReplaced.insert(Add);
+
+    return GEPToInt;
+  }
+
+  llvm::SmallVector<llvm::Use *> snapshotUses(llvm::Instruction *V) const {
+    llvm::SmallVector<llvm::Use *> Uses;
+    const auto ToPointer = [](llvm::Use &U) { return &U; };
+    llvm::transform(V->uses(), std::back_inserter(Uses), ToPointer);
+    return Uses;
+  }
+
+  RecursiveCoroutine<bool> replaceImpl(llvm::Use *U, llvm::Value *BasePointer) {
     revng_assert(BasePointer->getType()->isIntOrPtrTy());
+    revng_assert(U->get()->getType()->isIntOrPtrTy());
+
+    bool Changed = false;
 
     auto *UserInstruction = cast<llvm::Instruction>(U->getUser());
 
@@ -657,26 +895,23 @@ private:
 
     case llvm::Instruction::Add: {
 
-      // TODO bail out in case of add with negative constant
+      // FIXME TODO bail out in case of add with negative constant
 
-      setInsertPointBeforeUserInstruction(U);
+      auto *GEPCastedToInt = replaceAddWithGEP(U, BasePointer);
+      Changed = true;
 
-      auto *GEP = makeGEP(B,
-                          BasePointer,
-                          UserInstruction->getOperand(U->getOperandNo() == 0 ?
-                                                        1 :
-                                                        0));
-      for (llvm::Use *GEPUse : snapshotUses(UserInstruction))
-        rc_recur replaceImpl(GEPUse, GEP);
+      for (llvm::Use *IntUse : snapshotUses(GEPCastedToInt))
+        Changed |= rc_recur replaceImpl(IntUse, GEPCastedToInt);
 
     } break;
 
+    case llvm::Instruction::Freeze:
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
     case llvm::Instruction::BitCast: {
 
       for (llvm::Use *CastUse : snapshotUses(UserInstruction))
-        rc_recur replaceImpl(CastUse, BasePointer);
+        Changed |= rc_recur replaceImpl(CastUse, BasePointer);
 
     } break;
 
@@ -684,43 +919,143 @@ private:
       // Don't create any GEP in this case, since one is already there.
       // Just recur on all of the GEP's uses if this is the address operand. Or
       // fall back on the default if this is one of the indices.
-      auto PointerOpIndex = llvm::GetElementPtrInst::getPointerOperandIndex();
-      if (U->getOperandNo() == PointerOpIndex) {
+      auto *GEP = cast<llvm::GetElementPtrInst>(UserInstruction);
+      unsigned PointerOpNo = llvm::GetElementPtrInst::getPointerOperandIndex();
+      if (U->getOperandNo() == PointerOpNo) {
+        for (llvm::Use *GEPUse : snapshotUses(GEP))
+          Changed |= rc_recur replaceImpl(GEPUse, GEP);
 
-        for (llvm::Use *GEPUse : snapshotUses(UserInstruction))
-          rc_recur replaceImpl(GEPUse, UserInstruction);
-
-        break;
+        break; // break from switch. all operands do fall through to default.
       }
     }
       [[fallthrough]];
-
     default: {
       // We've reached the end of the linear path that can be rewritten as a
-      // GEP. Just cast the the value to the proper type if necessary.
-      llvm::Type *UseType = U->get()->getType();
-      revng_assert(UseType->isIntOrPtrTy());
-      if (not UseType->isPointerTy()) {
-        setInsertPointBeforeUserInstruction(U);
-        BasePointer = B.CreatePtrToInt(BasePointer, UseType);
+      // GEP. Just cast back the value to the proper integer or pointer type if
+      // necessary.
+      if (U->get() != BasePointer) {
+        auto *UseType = U->get()->getType();
+        auto *BasePointerType = BasePointer->getType();
+        if (BasePointerType != UseType) {
+          setInsertPointBeforeUserInstruction(U);
+          if (BasePointerType->isPointerTy()) {
+            BasePointer = B.CreatePtrToInt(BasePointer, UseType);
+          } else {
+            BasePointer = B.CreateIntToPtr(BasePointer, UseType);
+          }
+        }
+        auto *OldOperand = U->get();
+        U->set(BasePointer);
+        HadUsesReplaced.insert(OldOperand);
+        Changed = true;
       }
-      U->set(BasePointer);
     }
     }
-    rc_return;
+    rc_return Changed;
   }
 };
 
+static void crashOnPHINode(const llvm::Function &F) {
+  for (const llvm::Instruction &I : llvm::instructions(F)) {
+    if (isa<llvm::PHINode>(I)) {
+      std::string Message = "Unexpected PHINode in Function: ";
+      Message += F.getName().str();
+      revng_abort(Message.c_str());
+    }
+  }
+}
+
+static bool foldPointerCasts(llvm::Function &F) {
+  using WTVH = llvm::WeakTrackingVH;
+  llvm::SmallVector<WTVH, 8> Dead;
+
+  for (llvm::Instruction &I : llvm::instructions(F)) {
+    if (auto *PtrToInt = dyn_cast<llvm::PtrToIntInst>(&I)) {
+      revng_log(FindLog, "PTRTOINT: " << dumpToString(PtrToInt));
+      LoggerIndent X{FindLog};
+      for (auto &U : PtrToInt->uses()) {
+
+        if (auto *IntToPtr = dyn_cast<llvm::IntToPtrInst>(U.getUser())) {
+          revng_log(FindLog, "INTTOPTR: " << dumpToString(IntToPtr));
+
+          llvm::Value *Pointer = PtrToInt->getOperand(0);
+            Pointer->getType()->dump();
+            IntToPtr->getType()->dump();
+
+          if (Pointer->getType() != IntToPtr->getType()) {
+            revng_log(FindLog, "not replaced");
+            continue;
+          }
+
+          revng_log(FindLog, "Replace INTTOPTR with:");
+          Pointer->dump();
+
+          IntToPtr->replaceAllUsesWith(Pointer);
+          Dead.push_back(IntToPtr);
+        }
+
+      }
+    } else if (auto *IntToPtr = dyn_cast<llvm::IntToPtrInst>(&I)) {
+
+      revng_log(FindLog, "INTTOPTR: " << dumpToString(IntToPtr));
+      LoggerIndent X{FindLog};
+
+      for (auto &U : IntToPtr->uses()) {
+
+        if (auto *PtrToInt = dyn_cast<llvm::PtrToIntInst>(U.getUser())) {
+          revng_log(FindLog, "PTRTOINT: " << dumpToString(PtrToInt));
+
+          llvm::Value *Integer = IntToPtr->getOperand(0);
+            Integer->getType()->dump();
+            PtrToInt->getType()->dump();
+
+          if (Integer->getType() != PtrToInt->getType()) {
+            revng_log(FindLog, "not replaced");
+            continue;
+          }
+
+          revng_log(FindLog, "Replace PTRTOINT with:");
+          Integer->dump();
+
+          PtrToInt->replaceAllUsesWith(Integer);
+          Dead.push_back(PtrToInt);
+        }
+      }
+    }
+  }
+
+  RecursivelyDeleteTriviallyDeadInstructionsPermissive(Dead);
+
+  return not Dead.empty();
+}
+
 bool ArithmeticToGEPPass::runOnFunction(llvm::Function &F) {
 
-  llvm::SmallVector<LocalValue<>> ObviousPointers = getLocalPointers(F);
+  crashOnPHINode(F);
+
+  PointersFinder Finder(F);
+  llvm::SmallVector<LocalValue<>> Pointers = Finder.findPointers(F);
+
+  if (Pointers.empty())
+    return false;
 
   GEPRewriter Rewriter(F.getContext());
-  for (const LocalValue<> &PointerValue : ObviousPointers) {
+
+  std::set<const LocalValue<>> Replaced;
+  for (const LocalValue<> &PointerValue : Pointers) {
+
+    // This can happen because a likely pointer may also be an obvious
+    // pointer.
+    bool New = Replaced.insert(PointerValue).second;
+    if (not New)
+      continue;
+
     Rewriter.replace(PointerValue);
   }
 
-  return not ObviousPointers.empty();
+  foldPointerCasts(F);
+
+  return true;
 
   // we should also compute the likely pointers based on the transitive pointer
   // uses.
@@ -793,7 +1128,7 @@ char ArithmeticToGEPPass::ID = 0;
 
 static constexpr const char *Description = "Arithmetic-to-i8-GEP replacement";
 
-static llvm::RegisterPass<ArithmeticToGEPPass> X{ ArithToGEPFlag,
+static llvm::RegisterPass<ArithmeticToGEPPass> X{ ArithmeticToGEPFlag,
                                                   Description,
                                                   false,
                                                   false };
