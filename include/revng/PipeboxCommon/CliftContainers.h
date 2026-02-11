@@ -79,13 +79,16 @@ public:
   }
 
 public:
-  mlir::MLIRContext *getContext() { return &*Context; }
+  mlir::MLIRContext *getContext() const {
+    // FUTURE-WIP: we need access to this context even when we don't have any
+    //             modules.
+    if (Modules.empty())
+      return const_cast<mlir::MLIRContext *>(Context.get());
 
-  const mlir::ModuleOp getModule(const ObjectID &ID) const {
-    return *Modules.at(ID);
+    revng_assert(!Modules.empty());
+    return Modules.begin()->second.get().getContext();
   }
-
-  mlir::ModuleOp getModule(const ObjectID &ID) { return *Modules.at(ID); }
+  mlir::ModuleOp getModule(const ObjectID &ID) const { return *Modules.at(ID); }
 
   void assign(const ObjectID &ID, mlir::ModuleOp NewModule) {
     revng_assert(&*Context == NewModule->getContext());
@@ -155,13 +158,16 @@ public:
   }
 
 public:
-  mlir::MLIRContext *getContext() { return &*Context; }
+  mlir::MLIRContext *getContext() const {
+    // FUTURE-WIP: we need access to this context even when we don't have any
+    //             modules.
+    if (Modules.empty())
+      return const_cast<mlir::MLIRContext *>(Context.get());
 
-  const mlir::ModuleOp getModule(const ObjectID &ID) const {
-    return *Modules.at(ID);
+    revng_assert(!Modules.empty());
+    return Modules.begin()->second.get().getContext();
   }
-
-  mlir::ModuleOp getModule(const ObjectID &ID) { return *Modules.at(ID); }
+  mlir::ModuleOp getModule(const ObjectID &ID) const { return *Modules.at(ID); }
 
   void assign(const ObjectID &ID, mlir::ModuleOp NewModule) {
     revng_assert(&*Context == NewModule->getContext());
@@ -235,10 +241,12 @@ public:
   }
 
 public:
-  mlir::MLIRContext *getContext() { return &*Context; }
-
-  const mlir::ModuleOp getModule() const { return Module.get(); }
-  mlir::ModuleOp getModule() { return Module.get(); }
+  mlir::MLIRContext *getContext() const {
+    // FUTURE-WIP: this is a nasty hack, it lets us avoid `mutable`
+    //             and `const_cast`.
+    return Module.get().getContext();
+  }
+  mlir::ModuleOp getModule() const { return Module.get(); }
 
   void assign(mlir::ModuleOp NewModule) {
     revng_assert(&*Context == NewModule->getContext());
