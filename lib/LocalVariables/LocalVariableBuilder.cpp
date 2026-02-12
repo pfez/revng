@@ -181,7 +181,7 @@ LegacyVB::createCallStackArgumentVariable(const model::Type &VariableType) {
 
   llvm::Constant *VarTypeString = toLLVMString(VariableType, *F->getParent());
 
-  revng::IRBuilder B(F->getContext());
+  revng::NonDebugInfoCheckingIRBuilder B(F->getContext());
   setInsertPointToFirstNonAlloca(B, *F);
 
   Value *Size = ConstantInt::get(Types.InputPointerSizedInteger, VariableSize);
@@ -206,7 +206,7 @@ LegacyVB::createStackFrameVariable(model::UpcastableType FrameType) {
   size_t StackSize = FrameType->size().value_or(0);
   revng_assert(StackSize);
 
-  revng::IRBuilder B(F->getContext());
+  revng::NonDebugInfoCheckingIRBuilder B(F->getContext());
   setInsertPointToFirstNonAlloca(B, *F);
 
   Instruction
@@ -245,7 +245,7 @@ LegacyVB::createCopyOnUse(ReferenceType *LocationToCopy, Use &U) {
   if (auto *Instruction = llvm::dyn_cast<llvm::Instruction>(LocationToCopy))
     DebugLocation = Instruction->getDebugLoc();
 
-  revng::IRBuilder B(InsertBefore, DebugLocation);
+  revng::NonDebugInfoCheckingIRBuilder B(InsertBefore, DebugLocation);
 
   // Create a Copy to dereference the LocalVariable
   auto *CopyFnType = getCopyType(U->getType(), LocationToCopy->getType());
@@ -272,7 +272,7 @@ LegacyVB::createAssignmentBefore(Value *LocationToAssign,
     DebugLocation = Instruction->getDebugLoc();
 
   // Create an assignment that assigns ValueToAssign to LocationToAssign.
-  revng::IRBuilder B(InsertBefore, DebugLocation);
+  revng::NonDebugInfoCheckingIRBuilder B(InsertBefore, DebugLocation);
   auto *IRType = ValueToAssign->getType();
   auto *AssignFnType = getAssignFunctionType(IRType,
                                              LocationToAssign->getType());
@@ -293,7 +293,7 @@ VB::LocalVarType *VB::createLocalVariable(const model::Type &VariableType) {
   size_t VariableSize = VariableType.size().value_or(0);
   revng_assert(VariableSize);
 
-  revng::IRBuilder B(F->getContext());
+  revng::NonDebugInfoCheckingIRBuilder B(F->getContext());
   setInsertPointToFirstNonAlloca(B, *F);
 
   // Create an alloca of array type with number of elements equal to
@@ -310,7 +310,7 @@ VB::LocalVarType *VB::createLocalVariable(const model::Type &VariableType) {
 template<>
 std::pair<VB::LocalVarType *, llvm::Instruction *>
 VB::createLocalVariableAndTakeIntAddress(const model::Type &VariableType) {
-  revng::IRBuilder B(F->getContext());
+  revng::NonDebugInfoCheckingIRBuilder B(F->getContext());
   setInsertPointToFirstNonAlloca(B, *F);
   auto *Variable = createLocalVariable(VariableType);
   return {
