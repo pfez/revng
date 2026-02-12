@@ -2,12 +2,6 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-// FIXME TODO drop model in non legacy
-//  * add a metadata to call sites with their model return type, in the same
-//    place that emits the metadata used for getCallSitePrototype
-//    * this pass forwards this onto the allocas, and clifter can use that
-//  * for pointer size use data layout
-
 #include <compare>
 #include <functional>
 #include <iterator>
@@ -28,8 +22,10 @@
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
+#include "llvm/CodeGen/CodeGenPassBuilder.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
@@ -40,7 +36,9 @@
 #include "llvm/Pass.h"
 #include "llvm/PassInfo.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/TypeSize.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
 #include "revng/ABI/ModelHelpers.h"
@@ -238,6 +236,14 @@ static const Value *getPointerOperand(const Instruction *I) {
   return nullptr;
 }
 
+static llvm::Type *getAccessedType(const Instruction *I) {
+  if (auto *V = getStoreValueOperand<false>(I))
+    return V->getType();
+  if (auto *L = dyn_cast<LoadInst>(I))
+    return L->getType();
+  return nullptr;
+}
+
 //
 // Helpers for statements and side effects.
 //
@@ -259,9 +265,9 @@ static bool causesExponentialDataflowPaths(const Instruction *I) {
   if (isa<SelectInst>(I))
     return true;
 
-  llvm::Value *Op0 = nullptr;
-  llvm::Value *Op1 = nullptr;
-  llvm::Value *Op2 = nullptr;
+  Value *Op0 = nullptr;
+  Value *Op1 = nullptr;
+  Value *Op2 = nullptr;
 
   using namespace llvm::PatternMatch;
   if (match(I, m_FShl(m_Value(Op0), m_Value(Op1), m_Value(Op2))))
@@ -285,13 +291,13 @@ static bool hasSideEffects(const Instruction *I) {
   return false;
 }
 
-static bool mayReadMemory(const llvm::Instruction &I) {
+static bool mayReadMemory(const Instruction &I) {
   // We have to hardcode revng_call_stack_arguments and revng_stack_frame
   // because SegregateStackAccesses has to mark them as functions that read
   // inaccessible memory, in order to prevent some LLVM optimizations.
-  if (auto *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+  if (auto *Call = dyn_cast<CallInst>(&I)) {
     if (llvm::Function *Callee = getCalledFunction(Call)) {
-      llvm::StringRef Name = Callee->getName();
+      StringRef Name = Callee->getName();
       if (Name.startswith("revng_call_stack_arguments")
           or Name.startswith("revng_stack_frame")) {
         return false;
@@ -443,6 +449,11 @@ private:
     if (auto *Select = dyn_cast<SelectInst>(TheUser))
       return Select->getCondition() != U.get();
 
+    // Strictly speaking, returning false in all the other cases is not correct.
+    // However, given that we always start from allocas, and we only propagate
+    // pointers, we should be safe that we always hit a cast where we
+    // leaksAddress first before falling in a situation where we return false
+    // here, while we would have needed to return true.
     return false;
   }
 
@@ -463,7 +474,12 @@ private:
     if (auto *Call = dyn_cast<CallInst>(TheUser))
       return Call->isArgOperand(&U);
 
+    // TODO: we can probably remove this abort and just always return true.
+    // Returning true more often is always correct, but if we do it more often
+    // than strictly necessary we risk to emit more local variables than
+    // necessary.
     revng_abort();
+    return true;
   }
 };
 
@@ -598,41 +614,27 @@ static bool legacyLocalVariablesNoAlias(const Instruction *I,
 static bool
 accessesAllocaThatDoesntLeak(const Instruction *I,
                              const AllocasWhoseAddressDoesntLeak::Result
-                               &AllocasThatDontLeak,
-                             AliasAnalysis &AA) {
+                               &AllocasThatDontLeak) {
+  if (not isa<StoreInst>(I) and not isa<LoadInst>(I))
+    return false;
+
   const Value *PointerOp = getPointerOperand<false>(I);
-  if (not PointerOp)
-    return false;
-
-  const Value *ValueOp = getStoreValueOperand<false>(I);
-  const Type *ValueType = ValueOp ? ValueOp->getType() :
-                                    cast<LoadInst>(I)->getType();
-  if (not ValueType->isIntegerTy())
-    return false;
-
-  revng_assert(ValueType);
+  revng_assert(PointerOp);
 
   for (const AllocaInst *A : AllocasThatDontLeak) {
-    // FIXME we shouldn't be using MUST ALIAS
-    if (AA.isMustAlias(A, PointerOp))
+    if (PointerOp == A)
       return true;
-
-    //        FIXME more raffinate than just isMustAlias
-    //        if (hasStackTypeMetadata(Alloca)) {
-    //          Type = importModelType(*getStackTypeFromMetadata(Alloca,
-    //          Model));
-    //        } else if (hasVariableTypeMetadata(Alloca)) {
-    //          Type = importModelType(*getVariableTypeFromMetadata(Alloca,
-    //          Model));
-    //        } else {
-    //          Type = importLLVMType(Alloca->getAllocatedType());
-    //
-    //          if (Alloca->isArrayAllocation())
-    //            Type = ArrayType::get(Context, Type, getConstantInt(Size));
-    //        }
   }
 
   return false;
+}
+
+static llvm::LocationSize getAccessedSize(const llvm::Instruction *I) {
+  revng_assert(isa<LoadInst>(I) or isa<StoreInst>(I));
+  llvm::DataLayout TheDataLayout = I->getModule()->getDataLayout();
+  llvm::TypeSize IAccessedSize = TheDataLayout
+                                   .getTypeStoreSize(getAccessedType(I));
+  return LocationSize::precise(IAccessedSize);
 }
 
 template<bool IsLegacy>
@@ -673,7 +675,7 @@ bool AEMFP<IsLegacy>::noAlias(const Instruction *I,
     const Value *IPointerOperand = getPointerOperand<false>(I);
     if (not IPointerOperand) {
       revng_log(Log, "I accesses memory but is not a Load/Store");
-      if (accessesAllocaThatDoesntLeak(J, *AllocasThatDontLeak, *AA)) {
+      if (accessesAllocaThatDoesntLeak(J, *AllocasThatDontLeak)) {
         revng_log(Log, "accessesAllocaThatDoesntLeak(J)");
         return true;
       }
@@ -688,7 +690,7 @@ bool AEMFP<IsLegacy>::noAlias(const Instruction *I,
     const Value *JPointerOperand = getPointerOperand<false>(J);
     if (not JPointerOperand) {
       revng_log(Log, "J accesses memory but is not a Load/Store");
-      if (accessesAllocaThatDoesntLeak(I, *AllocasThatDontLeak, *AA)) {
+      if (accessesAllocaThatDoesntLeak(I, *AllocasThatDontLeak)) {
         revng_log(Log, "accessesAllocaThatDoesntLeak(I)");
         return true;
       }
@@ -697,7 +699,9 @@ bool AEMFP<IsLegacy>::noAlias(const Instruction *I,
     }
     revng_log(Log, "J pointer operand: " << dumpToString(JPointerOperand));
 
-    if (AA->isNoAlias(IPointerOperand, JPointerOperand)) {
+    llvm::LocationSize ISize = getAccessedSize(I);
+    llvm::LocationSize JSize = getAccessedSize(J);
+    if (AA->isNoAlias(IPointerOperand, ISize, JPointerOperand, JSize)) {
       revng_log(Log, "AA->isNoAlias(IPointerOperand, JPointerOperand) == true");
       return true;
     }
@@ -716,7 +720,7 @@ void AEMFP<IsLegacy>::applyTransferFunctionImpl(Instruction *I,
   using AvailableExpression = AvailableExpression<IsLegacy>;
   using AssignType = AssignType<IsLegacy>;
 
-  revng_log(Log, "applyTransferFunction on Instruction: " << dumpToString(I));
+  revng_log(Log, "applyTransferFunction on Instruction I: " << dumpToString(I));
   LoggerIndent X{ Log };
 
   if constexpr (IsLegacy) {
@@ -736,7 +740,7 @@ void AEMFP<IsLegacy>::applyTransferFunctionImpl(Instruction *I,
       LoggerIndent XXX{ Log };
       if (not noAlias(I, Available)) {
         revng_log(Log, "Available: " << dumpToString(Available));
-        revng_log(Log, "is not noAlias (MayAlias) with I");
+        revng_log(Log, "is not noAlias with I");
         revng_log(Log, "erase Available");
         E.erase(A);
       } else if (Assign and not noAlias(I, Assign)) {
@@ -1056,6 +1060,8 @@ getAvailableExpressions(Function &F,
                         AliasAnalysis *AA,
                         AllocasWhoseAddressDoesntLeak::Result
                           *AllocasThatDontLeak) {
+  revng_log(Log, "getAvailableExpressions: " << F.getName());
+
   using AvailableExpression = AvailableExpression<IsLegacy>;
   using AvailableSet = AvailableSet<IsLegacy>;
   using AssignType = AssignType<IsLegacy>;
@@ -1177,9 +1183,12 @@ private:
 
   bool serialize(llvm::Instruction *I) {
     LoggerIndent Indent{ Log };
-    // FIXME TODO: can we assert `isSerializable(*I)` instead??
-    // this is very likely to be feasible in the clift-based pipeline, if we
+    // TODO: can we assert `isSerializable(*I)` instead?
+    // This is very likely to be feasible in the clift-based pipeline, if we
     // allow SwitchToStatement to deal with non-scalar instructions.
+    // This is not ready yet though, because we have to drop the old backend
+    // pipeline, and we must make sure that SegregateStackAccesses handles
+    // calls that return non-scalar properly, which currently does not.
     if (isSerializable(*I)) {
       revng_log(Log, "serialize(I), I: " << dumpToString(I));
       Picked.ToSerialize.insert(I);
@@ -1249,14 +1258,13 @@ private:
           if (not IsLegacy and I.hasNUses(0))
             continue;
 
-          // FIXME, if I is a call that reads and writes memory, but has only
-          // one use, we may want to not serialize it and inline it in the use.
-          // This will probably happen often.
-          // Any such call can be modeled as a write followed by a read, such
-          // that the write aliases everything except local variables that don't
-          // escape.
-          // Inlining it would have the effect of postponing a write, which is
-          // something that we haven't ever considered to do.
+          // FIXME TODO: if I is a call that reads and writes memory, but has
+          // only one use, we may want to not serialize it and inline it in the
+          // use. This will probably happen often. Any such call can be modeled
+          // as a write followed by a read, such that the write aliases
+          // everything except local variables that don't escape. Inlining it
+          // would have the effect of postponing a write, which is something
+          // that we haven't ever considered to do.
           serialize(&I);
         }
       }
@@ -1400,8 +1408,7 @@ private:
               // If CandidateAssign accesses an alloca that doesn't leak, we can
               // always select CandidateAssign as SelectedAssign
               if (accessesAllocaThatDoesntLeak(CandidateAssign,
-                                               *AllocasThatDontLeak,
-                                               *AA)) {
+                                               *AllocasThatDontLeak)) {
                 revng_log(Log, "accessesAllocaThatDoesntLeak(CandidateAssign)");
                 SelectedAssign = CandidateAssign;
                 break;
@@ -1435,8 +1442,19 @@ private:
               revng_log(Log,
                         "CandidatePointer: " << dumpToString(CandidatePointer));
 
-              // FIXME do we really need to use AA here?? probably not
-              if (AA->isNoAlias(CandidatePointer, AssignUserPointer)) {
+              // In principle, we could avoid using AA here.
+              // But doing that results in unnecessary self-assignments of local
+              // variables, i.e. suboptimal code generation, because we can
+              // reuse values held by other variables less often.
+              // Using AA allows to detect when we can reuse them more often.
+              // FIXME add unit tests to test for this case
+              llvm::LocationSize
+                CandidateSize = getAccessedSize(CandidateAssign);
+              llvm::LocationSize AssignedUserSize = getAccessedSize(User);
+              if (AA->isNoAlias(CandidatePointer,
+                                CandidateSize,
+                                AssignUserPointer,
+                                AssignedUserSize)) {
                 revng_log(Log,
                           "AA->isNoAlias(CandidatePointer, AssignUserPointer)");
                 SelectedAssign = CandidateAssign;
@@ -1600,34 +1618,57 @@ template<bool IsLegacy>
 using LVB = LocalVariableBuilder<IsLegacy>;
 
 template<bool IsLegacy>
+LocalVariableBuilder<IsLegacy>
+makeVariableBuilder(Function &F,
+                    unsigned InputPointerByteSize,
+                    const model::Binary &Model) {
+
+  if constexpr (IsLegacy) {
+    return LVB<IsLegacy>::makeLegacy(Model, &F);
+  } else {
+    VariableBuilderTypes Types = VariableBuilderTypes{ *F.getParent(),
+                                                       InputPointerByteSize };
+
+    return LVB<IsLegacy>::make(Types, &F);
+  }
+}
+
+template<bool IsLegacy>
 class VariableInserter {
 public:
   using PickedInstructions = PickedInstructions<IsLegacy>;
 
 private:
+  // The Model is only used in legacy mode. Drop this when we drop legacy mode.
   const model::Binary &Model;
+  // The TypeMap is only used in legacy mode. Drop this when we drop legacy
+  // mode.
   const TypeMap TheTypeMap;
+
   Function &F;
-  LocalVariableBuilder<IsLegacy> LocalVariableBuilder;
+
+  LocalVariableBuilder<IsLegacy> VariableBuilder;
 
 public:
   VariableInserter(Function &TheF,
+                   unsigned InputPointerByteSize,
+                   // TODO: drop the next 2 arguments when we drop legacy mode
                    const model::Binary &TheModel,
                    TypeMap &&TMap) :
     Model(TheModel),
     TheTypeMap(std::move(TMap)),
     F(TheF),
-    LocalVariableBuilder(LVB<IsLegacy>::make(TheModel, TheF)) {}
+    VariableBuilder(makeVariableBuilder<IsLegacy>(F,
+                                                  InputPointerByteSize,
+                                                  TheModel)) {}
 
 public:
   bool run(const PickedInstructions &Picked) {
-    LocalVariableBuilder.setTargetFunction(&F);
-
     bool Changed = false;
 
     for (const auto &[TheUse, TheAssign] : Picked.ToReplaceWithAvailable) {
-      auto *Copy = LocalVariableBuilder.createCopyFromAssignedOnUse(TheAssign,
-                                                                    *TheUse);
+      auto *Copy = VariableBuilder.createCopyFromAssignedOnUse(TheAssign,
+                                                               *TheUse);
       TheUse->set(Copy);
     }
 
@@ -1723,28 +1764,9 @@ bool VI<IsLegacy>::serializeToLocalVariable(Instruction *I) {
   revng_assert(I->getType()->isIntOrPtrTy());
   const model::UpcastableType &VariableType = getModelType(I);
 
-  // FIXME TODO drop this
-  // const llvm::DataLayout &DL = I->getModule()->getDataLayout();
-  // auto ModelSize = VariableType->size().value();
-  // auto *IType = I->getType();
-  // auto IRSize = DL.getTypeStoreSize(IType);
-  // if (ModelSize < IRSize) {
-  //   revng_assert(IType->isPointerTy());
-  //   using model::Architecture::getPointerSize;
-  //   auto PtrSize = getPointerSize(Model.Architecture());
-  //   revng_assert(ModelSize == PtrSize);
-  // } else if (ModelSize > IRSize) {
-  //   auto &Prototype = *getCallSitePrototype(Model, cast<CallInst>(I));
-  //   using namespace abi::FunctionType;
-  //   abi::FunctionType::Layout Layout = Layout::make(Prototype);
-  //   revng_assert(Layout.returnMethod() == ReturnMethod::ModelAggregate);
-  //   if (Layout.hasSPTAR())
-  //     revng_assert(0 == I->getNumUses());
-  // }
-
   // First, we have to declare the LocalVariable, always at the entry block.
   // Create instruction that allocates a LocalVariable
-  LocalVarType<IsLegacy> *LocalVariable = LocalVariableBuilder
+  LocalVarType<IsLegacy> *LocalVariable = VariableBuilder
                                             .createLocalVariable(*VariableType);
   LocalVariable->setDebugLoc(I->getDebugLoc());
 
@@ -1757,27 +1779,75 @@ bool VI<IsLegacy>::serializeToLocalVariable(Instruction *I) {
 
     llvm::Instruction *ValueToUse = LocalVariable;
     if (not IsLegacy or shouldReplaceUseWithCopies(I, U)) {
-      ValueToUse = LocalVariableBuilder.createCopyOnUse(LocalVariable, U);
+      ValueToUse = VariableBuilder.createCopyOnUse(LocalVariable, U);
     }
     U.set(ValueToUse);
   }
 
-  LocalVariableBuilder.createAssignmentBefore(LocalVariable,
-                                              I,
-                                              I->getNextNonDebugInstruction());
+  VariableBuilder.createAssignmentBefore(LocalVariable,
+                                         I,
+                                         I->getNextNonDebugInstruction());
 
   return true;
+}
+
+template<bool IsLegacy>
+void registerCommonAnalyses(FunctionAnalysisManager &FAM) {
+
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+
+  if constexpr (not IsLegacy) {
+    FAM.registerPass([] { return llvm::registerAAAnalyses(); });
+    FAM.registerPass([] { return AllocasWhoseAddressDoesntLeak(); });
+  }
+  FAM.registerPass([] { return AvailableExpressionsAnalysis<IsLegacy>(); });
+  FAM.registerPass([] { return InstructionToSerializePicker<IsLegacy>(); });
 }
 
 template<bool IsLegacy>
 class SwitchToStatements
   : public llvm::PassInfoMixin<SwitchToStatements<IsLegacy>> {
 
-public:
-  const model::Binary &Model;
+private:
+  // This is only used in legacy mode for operating the LocalVariableBuilder
+  // inside the VariableInserter.
+  // TODO: drop when we drop legacy mode.
+  const model::Binary *Model;
+
+  /// The size in bytes of a pointer in the Binary we're decompiling.
+  /// Necessary for initializing a LocalVariableBuilder without the Model, in
+  /// non-legacy mode.
+  unsigned InputPointerByteSize;
 
 public:
-  SwitchToStatements(const model::Binary &M) : Model(M) {}
+  // This is meant to be used only in non-legacy mode.
+  SwitchToStatements(unsigned InputPointerByteSize) :
+    Model(nullptr), InputPointerByteSize(InputPointerByteSize) {
+    revng_assert(not IsLegacy);
+  }
+
+private:
+  // This is meant to be used only in legacy mode.
+  // This is why it's private, so we it can only be invoked via the factory,
+  // which is only available when IsLegacy is true.
+  //
+  // TODO: drop this when we drop legacy mode.
+  SwitchToStatements(const model::Binary &TheModel) :
+    Model(&TheModel),
+    InputPointerByteSize(getPointerSize(Model->Architecture())) {
+    revng_assert(IsLegacy);
+  }
+
+public:
+  // Factory meant to be called only for legacy mode.
+  //
+  // TODO: drop this when we drop legacy mode.
+  static SwitchToStatements makeLegacy(const model::Binary &Model)
+    requires IsLegacy
+  {
+    return SwitchToStatements(Model);
+  }
 
 public:
   llvm::PreservedAnalyses run(llvm::Function &F,
@@ -1785,18 +1855,18 @@ public:
 
     TypeMap InstructionTypes = {};
     if constexpr (IsLegacy) {
-      auto ModelFunction = llvmToModelFunction(Model, F);
+      auto ModelFunction = llvmToModelFunction(*Model, F);
       revng_assert(ModelFunction != nullptr);
 
       InstructionTypes = initModelTypesConsideringUses(F,
                                                        ModelFunction,
-                                                       Model,
+                                                       *Model,
                                                        /* PointersOnly */
                                                        false);
     }
-    VariableInserter<IsLegacy> VarInserter{ F,
-                                            Model,
-                                            std::move(InstructionTypes) };
+    VariableInserter<IsLegacy> VarInserter{
+      F, InputPointerByteSize, *Model, std::move(InstructionTypes)
+    };
 
     const auto
       &Picked = FAM.getResult<InstructionToSerializePicker<IsLegacy>>(F);
@@ -1804,7 +1874,83 @@ public:
 
     return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }
+
+  static void registerCallbacks(PassBuilder &PB)
+    requires(not IsLegacy)
+  {
+    using PipelineElementArray = ArrayRef<PassBuilder::PipelineElement>;
+    PB.registerAnalysisRegistrationCallback(registerCommonAnalyses<false>);
+    PB.registerPipelineParsingCallback([](StringRef Name,
+                                          FunctionPassManager &FPM,
+                                          PipelineElementArray) {
+      if (Name == "switch-to-statements-test") {
+        FPM.addPass(SwitchToStatements<false>{ /*InputPointerSize*/ 8 });
+        return true;
+      }
+      return false;
+    });
+  }
 };
+
+extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
+llvmGetPassPluginInfo() {
+  return { LLVM_PLUGIN_API_VERSION,
+           "SwitchToStatementsTests",
+           "1.0",
+           SwitchToStatements<false>::registerCallbacks };
+}
+
+// The template is only for legacy mode.
+// TODO: drop when we drop legacy mode.
+template<bool IsLegacy>
+bool switchToStatements(const model::Binary *Model, llvm::Function &F);
+
+// This specialization is only for legacy mode.
+// TODO: drop when we drop legacy mode.
+template<>
+bool switchToStatements<true>(const model::Binary *Model, llvm::Function &F) {
+  revng_log(Log, "switchToStatements (legacy): " << F.getName());
+
+  FunctionAnalysisManager FAM;
+  registerCommonAnalyses<true>(FAM);
+
+  FunctionPassManager FPM;
+  FPM.addPass(SwitchToStatements<true>::makeLegacy(*Model));
+  llvm::PreservedAnalyses Preserved = FPM.run(F, FAM);
+
+  return Preserved.areAllPreserved() ? false : true;
+}
+
+template<>
+bool switchToStatements<false>(const model::Binary *Model, llvm::Function &F) {
+
+  revng_log(Log, "switchToStatements (non-legacy): " << F.getName());
+
+  ModuleAnalysisManager MAM;
+  FunctionAnalysisManager FAM;
+
+  // Cross register passes, because function-level alias analyses fall back to
+  // querying GlobalsAA in some cases. If the analysis manager aren't
+  // cross-registered, that fallback query just crashes.
+  // We don't activate GlobalsAA, but GlobalsAA still needs to be registered, in
+  // order for local AA to query it and see it doesn't have cached results
+  // because it did not run.
+  FAM.registerPass([&MAM] { return ModuleAnalysisManagerFunctionProxy(MAM); });
+  MAM.registerPass([&FAM] { return FunctionAnalysisManagerModuleProxy(FAM); });
+
+  // Register module-level analyses, because alias analysis looks up GlobalsAA,
+  // which is a module-level pass.
+  PassBuilder PB;
+  PB.registerModuleAnalyses(MAM);
+
+  registerCommonAnalyses<false>(FAM);
+
+  FunctionPassManager FPM;
+  FPM.addPass(SwitchToStatements<false>(getPointerSize(Model->Architecture())));
+  llvm::PreservedAnalyses Preserved = FPM.run(F, FAM);
+
+  return Preserved.areAllPreserved() ? false : true;
+}
 
 template<bool IsLegacy>
 class SwitchToStatementsPass : public FunctionPass {
@@ -1820,55 +1966,6 @@ public:
 
   bool runOnFunction(Function &F) override;
 };
-
-template<bool IsLegacy>
-static bool switchToStatements(const model::Binary *Model, llvm::Function &F) {
-
-  revng_log(Log, "switchToStatements: " << F.getName());
-
-  // MPM.addPass(RequireAnalysisPass<GlobalsAA, Module>());
-  //
-  ModuleAnalysisManager MAM;
-  FunctionAnalysisManager FAM;
-  FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(MAM); });
-  // MAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(MAM);});
-
-  PassBuilder PB;
-  PB.registerModuleAnalyses(MAM);
-  PB.registerFunctionAnalyses(FAM);
-
-  if constexpr (not IsLegacy) {
-    FAM.registerPass([] {
-      // Taken from LLVM, in PassBuilder::buildDefaultAAPipeline()
-      AAManager AA;
-      AA.registerFunctionAnalysis<BasicAA>();
-      AA.registerFunctionAnalysis<ScopedNoAliasAA>();
-      AA.registerFunctionAnalysis<TypeBasedAA>();
-
-      // With the current LLVM version, SCEVAA doesn't play nice with the new
-      // pass manager. We'll have to wait future versions of LLVM to integrate
-      // it.
-
-      // Add support for querying global aliasing information when available.
-      // Because the `AAManager` is a function analysis and `GlobalsAA` is a
-      // module analysis, all that the `AAManager` can do is query for any
-      // *cached* results from `GlobalsAA` through a readonly proxy.
-      // TODO
-      // AA.registerModuleAnalysis<GlobalsAA>();
-
-      return AA;
-    });
-    FAM.registerPass([] { return AllocasWhoseAddressDoesntLeak(); });
-  }
-  FAM.registerPass([] { return AvailableExpressionsAnalysis<IsLegacy>(); });
-  FAM.registerPass([] { return InstructionToSerializePicker<IsLegacy>(); });
-
-  FunctionPassManager FPM;
-  FPM.addPass(SwitchToStatements<IsLegacy>(*Model));
-  llvm::PreservedAnalyses Preserved = FPM.run(F, FAM);
-
-  return Preserved.areAllPreserved() ? false : true;
-}
 
 template<>
 char SwitchToStatementsPass<false>::ID = 0;
