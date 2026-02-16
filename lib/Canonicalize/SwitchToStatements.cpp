@@ -1048,20 +1048,6 @@ private:
           if (not isSerializable(I))
             continue;
 
-          // FIXME this is not necessary. it should be enough to do this check
-          // in VariableInserter
-          //
-          // In principle, we could always serialize to a local variable here.
-          // But in the new clift based pipeline, serializing instructions that
-          // have 0 uses is detrimental, since it ends up generating local
-          // variables with 0 uses. So we don't do that.
-          // TODO: the fact that we don't serialize these means that they will
-          // not end up in any local variable for potential reuse, but on the
-          // other hand they already have 0 uses, so we don't care.
-          if constexpr (not IsLegacy)
-            if (I.hasNUses(0))
-              continue;
-
           // If I is a call that reads and writes memory, but has only one use,
           // we may want to not serialize it and inline it in the use. This will
           // probably happen often. Any such call can be modeled as a write
@@ -1109,15 +1095,6 @@ private:
     // be serialied for it.
     if (isPickedToSerialize(I)) {
       revng_log(Log, "isPickedToSerialize(I)");
-      rc_return false;
-    }
-
-    // FIXME this is not necessary. it should be enough to do this check
-    // in VariableInserter
-    // If I has no uses, we are done, and there's no reason to require the
-    // serialization of MemoryRead before I.
-    if (not IsLegacy and I->hasNUses(0)) {
-      revng_log(Log, "I has no uses");
       rc_return false;
     }
 
@@ -1414,8 +1391,12 @@ public:
       I->eraseFromParent();
     }
 
-    for (Instruction *I : Picked.ToSerialize)
+    for (Instruction *I : Picked.ToSerialize) {
+      // FIXME: we should re-introduce the workaround on 0 uses here.
+      // If ToSerialize contains something with 0 uses we don't add the
+      // local variable.
       Changed |= serializeToLocalVariable(I);
+    }
 
     return Changed;
   }
