@@ -38,6 +38,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ModRef.h"
 #include "llvm/Support/TypeSize.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
@@ -236,12 +237,10 @@ static const Value *getPointerOperand(const Instruction *I) {
   return nullptr;
 }
 
-static llvm::Type *getAccessedType(const Instruction *I) {
-  if (auto *V = getStoreValueOperand<false>(I))
-    return V->getType();
-  if (auto *L = dyn_cast<LoadInst>(I))
-    return L->getType();
-  return nullptr;
+static llvm::TypeSize getAccessedSize(const llvm::StoreInst *Store) {
+  llvm::DataLayout TheDataLayout = Store->getModule()->getDataLayout();
+  llvm::Type *ValueType = Store->getValueOperand()->getType();
+  return TheDataLayout.getTypeStoreSize(ValueType);
 }
 
 //
@@ -391,100 +390,6 @@ getAccessedLegacyLocal(const Instruction *I) {
   return getAccessedLocalVariableFromModelGEP(ModelGEPRef);
 }
 
-/// A class that represents an LLVM analysis that computes a set of AllocaInst
-/// in a Function whose address doesn't leak.
-class AllocasWhoseAddressDoesntLeak
-  : public llvm::AnalysisInfoMixin<AllocasWhoseAddressDoesntLeak> {
-
-  friend llvm::AnalysisInfoMixin<AllocasWhoseAddressDoesntLeak>;
-  static llvm::AnalysisKey Key;
-
-public:
-  using Result = SmallVector<AllocaInst *>;
-
-  Result run(llvm::Function &F, llvm::FunctionAnalysisManager &FAM) {
-    Result AllocasThatDontLeak;
-    BasicBlock &EntryBlock = F.getEntryBlock();
-
-    for (Instruction &I : EntryBlock) {
-      auto *Alloca = dyn_cast<AllocaInst>(&I);
-      if (not Alloca)
-        break;
-
-      if (not leaksAddress(Alloca))
-        AllocasThatDontLeak.push_back(Alloca);
-    }
-
-    return AllocasThatDontLeak;
-  }
-
-private:
-  bool leaksAddress(AllocaInst *A) {
-    SmallVector<User *> Worklist;
-    Worklist.push_back(A);
-
-    while (not Worklist.empty()) {
-      User *Current = Worklist.back();
-      Worklist.pop_back();
-
-      for (Use &U : Current->uses()) {
-        if (leaksAddress(U))
-          return true;
-
-        if (propagatesPointer(U))
-          Worklist.push_back(U.getUser());
-      }
-    }
-    return false;
-  }
-
-  bool propagatesPointer(Use &U) const {
-    User *TheUser = U.getUser();
-    if (isa<BitCastInst>(TheUser))
-      return true;
-
-    if (auto *GEP = dyn_cast<GetElementPtrInst>(TheUser))
-      return GEP->getPointerOperandIndex() == U.getOperandNo();
-
-    if (auto *Select = dyn_cast<SelectInst>(TheUser))
-      return Select->getCondition() != U.get();
-
-    // Strictly speaking, returning false in all the other cases is not correct.
-    // However, given that we always start from allocas, and we only propagate
-    // pointers, we should be safe that we always hit a cast where we
-    // leaksAddress first before falling in a situation where we return false
-    // here, while we would have needed to return true.
-    return false;
-  }
-
-  bool leaksAddress(Use &U) const {
-    User *TheUser = U.getUser();
-
-    if (isa<GetElementPtrInst>(TheUser) or isa<SelectInst>(TheUser)
-        or isa<BitCastInst>(TheUser) or isa<ReturnInst>(TheUser)
-        or isa<LoadInst>(TheUser) or isa<ICmpInst>(TheUser))
-      return false;
-
-    if (auto *Store = dyn_cast<StoreInst>(TheUser))
-      return U.getOperandNo() != Store->getPointerOperandIndex();
-
-    if (isa<PtrToIntInst>(TheUser))
-      return true;
-
-    if (auto *Call = dyn_cast<CallInst>(TheUser))
-      return Call->isArgOperand(&U);
-
-    // TODO: we can probably remove this abort and just always return true.
-    // Returning true more often is always correct, but if we do it more often
-    // than strictly necessary we risk to emit more local variables than
-    // necessary.
-    revng_abort();
-    return true;
-  }
-};
-
-llvm::AnalysisKey AllocasWhoseAddressDoesntLeak::Key = {};
-
 /// A class that represents an available expression, along with the assignment
 /// that writes its value somewhere, making it available.
 template<bool IsLegacy>
@@ -543,13 +448,9 @@ public:
 
 private:
   AliasAnalysis *AA;
-  AllocasWhoseAddressDoesntLeak::Result *AllocasThatDontLeak;
 
 public:
-  AvailableExpressionsMonotoneFramework(AliasAnalysis *A,
-                                        AllocasWhoseAddressDoesntLeak::Result
-                                          *Allocas) :
-    AA(A), AllocasThatDontLeak(Allocas) {}
+  AvailableExpressionsMonotoneFramework(AliasAnalysis *A) : AA(A) {}
 
 public:
   LatticeElement combineValues(const LatticeElement &LHS,
@@ -568,7 +469,7 @@ public:
 private:
   void applyTransferFunctionImpl(Instruction *I, LatticeElement &E) const;
 
-  bool noAlias(const Instruction *I, const Instruction *J) const;
+  bool mayClobber(Instruction *Access, Instruction *Affected) const;
 };
 
 template<bool IsLegacy>
@@ -611,107 +512,42 @@ static bool legacyLocalVariablesNoAlias(const Instruction *I,
   return AccessedByI != AccessedByJ;
 }
 
-static bool
-accessesAllocaThatDoesntLeak(const Instruction *I,
-                             const AllocasWhoseAddressDoesntLeak::Result
-                               &AllocasThatDontLeak) {
-  if (not isa<StoreInst>(I) and not isa<LoadInst>(I))
-    return false;
-
-  const Value *PointerOp = getPointerOperand<false>(I);
-  revng_assert(PointerOp);
-
-  for (const AllocaInst *A : AllocasThatDontLeak) {
-    if (PointerOp == A)
-      return true;
-  }
-
-  return false;
-}
-
-static llvm::LocationSize getAccessedSize(const llvm::Instruction *I) {
-  revng_assert(isa<LoadInst>(I) or isa<StoreInst>(I));
-  llvm::DataLayout TheDataLayout = I->getModule()->getDataLayout();
-  llvm::TypeSize IAccessedSize = TheDataLayout
-                                   .getTypeStoreSize(getAccessedType(I));
-  return LocationSize::precise(IAccessedSize);
-}
-
 template<bool IsLegacy>
-bool AEMFP<IsLegacy>::noAlias(const Instruction *I,
-                              const Instruction *J) const {
-  revng_log(Log, "noAlias?");
-  LoggerIndent X{ Log };
-  revng_log(Log, "I: " << dumpToString(I));
-  revng_log(Log, "J: " << dumpToString(J));
-  LoggerIndent XX{ Log };
+bool AEMFP<IsLegacy>::mayClobber(Instruction *Access,
+                                 Instruction *Affected) const {
 
-  // If either instruction doesn't access memory, they are noAlias for sure.
-  if (not I->mayReadOrWriteMemory()) {
-    revng_log(Log, "I->mayReadOrWriteMemory() == false");
-    return true;
-  }
-  if (not J->mayReadOrWriteMemory()) {
-    revng_log(Log, "J->mayReadOrWriteMemory() == false");
-    return true;
-  }
+  revng_log(Log, "mayClobber");
+  LoggerIndent Indent{ Log };
+  revng_log(Log, "Access: " << dumpToString(Access));
+  revng_log(Log, "Affected: " << dumpToString(Affected));
+  LoggerIndent MoreIndent{ Log };
 
-  // Here both instructions access memory.
-
+  bool Result = true;
   if constexpr (IsLegacy) {
-    // First, handle LocalVariables specifically.
-    // TODO: this is a poor's man alias analysis, which only explicitly handles
-    // stuff that is frequent and that we care about. In the future we have
-    // plans to replace it with a full fledged AliasAnalysis from LLVM
-    if (legacyLocalVariablesNoAlias(I, J)) {
-      revng_log(Log, "I and J both access local variables that do not alias");
-      return true;
+
+    // If either instruction doesn't access memory, they are noAlias for sure.
+    if (not Access->mayReadOrWriteMemory()) {
+      revng_log(Log, "Access->mayReadOrWriteMemory() == false");
+      Result = false;
+    } else if (not Affected->mayReadOrWriteMemory()) {
+      revng_log(Log, "Affected->mayReadOrWriteMemory() == false");
+      return false;
+    } else {
+      // Here both instructions access memory.
+
+      // Just handle LocalVariables specifically.
+      // TODO: this is a poor's man alias analysis, which only explicitly
+      // handles stuff that is frequent and that we care about. In the future we
+      // have plans to replace it with a full fledged AliasAnalysis from LLVM
+      Result = not legacyLocalVariablesNoAlias(Access, Affected);
     }
   } else {
-
-    // If I is not a Load/Store, we don't know how it accesses memory, so we
-    // can't prove is noalias with J, unless J is a Load/Store accessing an
-    // alloca whose address doesn't leak.
-    const Value *IPointerOperand = getPointerOperand<false>(I);
-    if (not IPointerOperand) {
-      revng_log(Log, "I accesses memory but is not a Load/Store");
-      if (accessesAllocaThatDoesntLeak(J, *AllocasThatDontLeak)) {
-        revng_log(Log, "accessesAllocaThatDoesntLeak(J)");
-        return true;
-      }
-      revng_log(Log, "not accessesAllocaThatDoesntLeak(J)");
-      return false;
-    }
-    revng_log(Log, "I pointer operand: " << dumpToString(IPointerOperand));
-
-    // Likewise, if J is not a Load/Store, we don't know how it accesses memory,
-    // so we can't prove is noalias with I, unless I is a Load/Store accessing
-    // an alloca whose address doesn't leak.
-    const Value *JPointerOperand = getPointerOperand<false>(J);
-    if (not JPointerOperand) {
-      revng_log(Log, "J accesses memory but is not a Load/Store");
-      if (accessesAllocaThatDoesntLeak(I, *AllocasThatDontLeak)) {
-        revng_log(Log, "accessesAllocaThatDoesntLeak(I)");
-        return true;
-      }
-      revng_log(Log, "not accessesAllocaThatDoesntLeak(I)");
-      return false;
-    }
-    revng_log(Log, "J pointer operand: " << dumpToString(JPointerOperand));
-
-    llvm::LocationSize ISize = getAccessedSize(I);
-    llvm::LocationSize JSize = getAccessedSize(J);
-    if (AA->isNoAlias(IPointerOperand, ISize, JPointerOperand, JSize)) {
-      revng_log(Log, "AA->isNoAlias(IPointerOperand, JPointerOperand) == true");
-      return true;
-    }
-    revng_log(Log, "AA->isNoAlias(IPointerOperand, JPointerOperand) == false");
+    Result = isModSet(AA->getModRefInfo(Access, Affected));
   }
-
-  // In all the other cases we always fall back to false, meaning that we can't
-  // say for sure that I and J do not alias.
-  revng_log(Log, "I and J aren't provably noAlias");
-  return false;
+  revng_log(Log,
+            "Access may " << (Result ? std::string() : std::string("not "))
+                          << "clobber Affected");
+  return Result;
 }
 
 template<bool IsLegacy>
@@ -721,7 +557,7 @@ void AEMFP<IsLegacy>::applyTransferFunctionImpl(Instruction *I,
   using AssignType = AssignType<IsLegacy>;
 
   revng_log(Log, "applyTransferFunction on Instruction I: " << dumpToString(I));
-  LoggerIndent X{ Log };
+  LoggerIndent Indent{ Log };
 
   if constexpr (IsLegacy) {
     revng_assert(not isa<LoadInst>(I) and not isa<StoreInst>(I));
@@ -738,17 +574,14 @@ void AEMFP<IsLegacy>::applyTransferFunctionImpl(Instruction *I,
       revng_log(Log, "Available: " << dumpToString(Available));
       revng_log(Log, "Assign: " << dumpToString(Assign));
       LoggerIndent XXX{ Log };
-      if (not noAlias(I, Available)) {
-        revng_log(Log, "Available: " << dumpToString(Available));
-        revng_log(Log, "is not noAlias with I");
+      if (mayClobber(I, Available)) {
+        revng_log(Log, "I may clobber Available: " << dumpToString(Available));
         revng_log(Log, "erase Available");
         E.erase(A);
-      } else if (Assign and not noAlias(I, Assign)) {
-        revng_log(Log, "Assign: " << dumpToString(Assign));
+      } else if (Assign and mayClobber(I, Assign)) {
+        revng_log(Log, "I may clobber Assign: " << dumpToString(Assign));
         revng_log(Log, "erase Available");
         E.erase(A);
-      } else {
-        revng_log(Log, "is noAlias with I");
       }
     }
   }
@@ -790,7 +623,7 @@ AEMFP<IsLegacy>::applyTransferFunction(ProgramPointNode *ProgramPoint,
 
   revng_log(Log, "initial set");
   if (Log.isEnabled()) {
-    LoggerIndent X{ Log };
+    LoggerIndent ModeIndent{ Log };
     for (const auto &[Available, Assign] : Result) {
       revng_log(Log, "Available: " << dumpToString(Available));
       revng_log(Log, "Assign: " << dumpToString(Assign));
@@ -801,7 +634,7 @@ AEMFP<IsLegacy>::applyTransferFunction(ProgramPointNode *ProgramPoint,
 
   revng_log(Log, "final set");
   if (Log.isEnabled()) {
-    LoggerIndent X{ Log };
+    LoggerIndent ModeIndent{ Log };
     for (const auto &[Available, Assign] : Result) {
       revng_log(Log, "Available: " << dumpToString(Available));
       revng_log(Log, "Assign: " << dumpToString(Assign));
@@ -1056,10 +889,7 @@ using AEResult = AvailableExpressionsResult<IsLegacy>;
 
 template<bool IsLegacy>
 static AEResult<IsLegacy>
-getAvailableExpressions(Function &F,
-                        AliasAnalysis *AA,
-                        AllocasWhoseAddressDoesntLeak::Result
-                          *AllocasThatDontLeak) {
+getAvailableExpressions(Function &F, AliasAnalysis *AA) {
   revng_log(Log, "getAvailableExpressions: " << F.getName());
 
   using AvailableExpression = AvailableExpression<IsLegacy>;
@@ -1093,7 +923,7 @@ getAvailableExpressions(Function &F,
   ProgramPointsCFG *Graph = &Result.ProgramPointsGraph;
   ProgramPointNode *Entry = Graph->getEntryNode();
 
-  AEMFP<IsLegacy> AvailableExpressionsMF{ AA, AllocasThatDontLeak };
+  AEMFP<IsLegacy> AvailableExpressionsMF{ AA };
   // std::exchange here is only needed to make revng check-conventions happy.
   std::exchange(Result.AvailableExpressions,
                 MFP::getMaximalFixedPoint<>(AvailableExpressionsMF,
@@ -1122,11 +952,7 @@ public:
   using Result = AvailableExpressionsResult<IsLegacy>;
   Result run(llvm::Function &F, llvm::FunctionAnalysisManager &FAM) {
     AliasAnalysis *AA = IsLegacy ? nullptr : &FAM.getResult<AAManager>(F);
-    AllocasWhoseAddressDoesntLeak::Result
-      *AllocasThatDontLeak = IsLegacy ?
-                               nullptr :
-                               &FAM.getResult<AllocasWhoseAddressDoesntLeak>(F);
-    return getAvailableExpressions<IsLegacy>(F, AA, AllocasThatDontLeak);
+    return getAvailableExpressions<IsLegacy>(F, AA);
   }
 };
 
@@ -1154,7 +980,6 @@ private:
   std::unordered_map<const Instruction *, size_t> ProgramOrdering = {};
   Result Picked;
   AliasAnalysis *AA;
-  AllocasWhoseAddressDoesntLeak::Result *AllocasThatDontLeak;
 
 public:
   InstructionToSerializePicker() :
@@ -1164,7 +989,6 @@ public:
   Result run(llvm::Function &F, llvm::FunctionAnalysisManager &FAM) {
     if constexpr (not IsLegacy) {
       AA = &FAM.getResult<AAManager>(F);
-      AllocasThatDontLeak = &FAM.getResult<AllocasWhoseAddressDoesntLeak>(F);
     }
     AvailableExpressions = &FAM.getResult<AEA<IsLegacy>>(F);
 
@@ -1177,18 +1001,13 @@ public:
 private:
   bool isSerializable(const Instruction &I) const {
     const llvm::Type *T = I.getType();
+    // FIXME: in non-legacy mode, only void should be non-serializable
     return not T->isVoidTy() and not T->isAggregateType()
            and not isCallToTagged(&I, FunctionTags::IsRef);
   }
 
   bool serialize(llvm::Instruction *I) {
     LoggerIndent Indent{ Log };
-    // TODO: can we assert `isSerializable(*I)` instead?
-    // This is very likely to be feasible in the clift-based pipeline, if we
-    // allow SwitchToStatement to deal with non-scalar instructions.
-    // This is not ready yet though, because we have to drop the old backend
-    // pipeline, and we must make sure that SegregateStackAccesses handles
-    // calls that return non-scalar properly, which currently does not.
     if (isSerializable(*I)) {
       revng_log(Log, "serialize(I), I: " << dumpToString(I));
       Picked.ToSerialize.insert(I);
@@ -1221,33 +1040,17 @@ private:
         for (Instruction &I : *BB) {
           ProgramOrdering[&I] = NextOrder++;
 
+          // If it's not a statement, don't pick it.
           if (not hasSideEffects(&I))
             continue;
 
-          // If it's a statement we have to check if it can be serialized, and
-          // potentially do it.
-
-          // If it's a statement but it's not serializable we can't pick it.
-          // Later parts of the pipeline will have to know about this.
-          // FIXME TODO
-          // In particular, in the new pipeline, the Clifter will have to match
-          // these and emit local variables on the fly for them.
-          // Currently, non serializable statements are:
-          // * calls returning void on LLVM IR
-          // * calls returning aggregates on LLVM IR, used for RFD, returning
-          //   register sets. they always define a local variable in C, but that
-          //   variable gets emitted on the fly by the clifter.
-          // * not clear what happens with SPTAR
-          // * opaque functions tagged with IsRef (not relevant for clifter)
-          // FIXME TODO
-          //   probably the best thing to do in the long term is drop the
-          //   special case on aggregates, that was basically there only for
-          //   limitations of the old pipeline.
-          //   when that happens. we can just check for void here, and serialize
-          //   even non-scalar instructions.
+          // If it's a statement but it's not serializable, don't pick it.
           if (not isSerializable(I))
             continue;
 
+          // FIXME this is not necessary. it should be enough to do this check
+          // in VariableInserter
+          //
           // In principle, we could always serialize to a local variable here.
           // But in the new clift based pipeline, serializing instructions that
           // have 0 uses is detrimental, since it ends up generating local
@@ -1255,16 +1058,17 @@ private:
           // TODO: the fact that we don't serialize these means that they will
           // not end up in any local variable for potential reuse, but on the
           // other hand they already have 0 uses, so we don't care.
-          if (not IsLegacy and I.hasNUses(0))
-            continue;
+          if constexpr (not IsLegacy)
+            if (I.hasNUses(0))
+              continue;
 
-          // FIXME TODO: if I is a call that reads and writes memory, but has
-          // only one use, we may want to not serialize it and inline it in the
-          // use. This will probably happen often. Any such call can be modeled
-          // as a write followed by a read, such that the write aliases
-          // everything except local variables that don't escape. Inlining it
-          // would have the effect of postponing a write, which is something
-          // that we haven't ever considered to do.
+          // If I is a call that reads and writes memory, but has only one use,
+          // we may want to not serialize it and inline it in the use. This will
+          // probably happen often. Any such call can be modeled as a write
+          // followed by a read, such that the write aliases everything except
+          // local variables that don't escape. Inlining it would have the
+          // effect of postponing a write, which is something that we haven't
+          // ever considered to do.
           serialize(&I);
         }
       }
@@ -1280,12 +1084,26 @@ private:
     return Picked;
   }
 
+  bool assignSameLocation(const AssignType *X, const AssignType *Y)
+    requires(not IsLegacy)
+  {
+
+    if (getAccessedSize(X) != getAccessedSize(Y))
+      return false;
+
+    const Value *XPointer = getStorePointerOperand<false>(X);
+    const Value *YPointer = getStorePointerOperand<false>(Y);
+    return AA->isMustAlias(XPointer, YPointer);
+  }
+
   RecursiveCoroutine<bool>
   shouldSerializeReadBeforeOrAtI(Instruction *I, Instruction *MemoryRead) {
     revng_log(Log, "PickFrom I: " << dumpToString(I));
     revng_log(Log, "MemoryRead: " << dumpToString(MemoryRead));
 
     LoggerIndent Indent{ Log };
+
+    // FIXME TODO refactor me from here
 
     // If I has already been picked for serialization it means that I shouldn't
     // be serialied for it.
@@ -1294,6 +1112,8 @@ private:
       rc_return false;
     }
 
+    // FIXME this is not necessary. it should be enough to do this check
+    // in VariableInserter
     // If I has no uses, we are done, and there's no reason to require the
     // serialization of MemoryRead before I.
     if (not IsLegacy and I->hasNUses(0)) {
@@ -1308,6 +1128,8 @@ private:
       revng_assert(not isSerializable(*I) or isPickedToSerialize(I));
       rc_return false;
     }
+
+    // FIXME TODO refactor me until here
 
     // If it exists a use U of I for which MemoryRead is not available, then
     // MemoryRead should be serialized before or at I, unless the whole
@@ -1330,12 +1152,6 @@ private:
       revng_log(Log, "User: " << dumpToString(User));
       LoggerIndent MoreUserIndent{ Log };
 
-      if (AvailableExpressions->isAvailableAt(MemoryRead, U)) {
-        revng_log(Log, "MemoryRead isAvailableAt(User)");
-        continue;
-      }
-      revng_log(Log, "not MemoryRead isAvailableAt(User)");
-
       // Skip over the Assign operand representing variables that are being
       // assigned, because we need to preserve them.
       if (isStorePointerOperand<IsLegacy>(U, User)) {
@@ -1344,13 +1160,10 @@ private:
       }
       revng_log(Log, "not I isAssignedOperand(User)");
 
-      auto Available = AvailableExpressions->getAvailableAt(I, U);
-      if (Available.empty()) {
-        revng_log(Log, "I is not available at User");
-        rc_return serialize(I);
-      }
-      revng_log(Log, "I is available at User");
-
+      // The same use U of I could have already been picked in a previous
+      // iteration, from a different memory read.
+      // Detect that case and quickly bail out.
+      // In practice we have already taken that decision and we will reuse that.
       if (auto It = Picked.ToReplaceWithAvailable.find(&U);
           It != Picked.ToReplaceWithAvailable.end()) {
         revng_log(Log,
@@ -1360,188 +1173,66 @@ private:
       }
       revng_log(Log, "Find where I is available");
 
-      SmallVector<AssignType *> AssignsWhereIIsAvailable;
-      llvm::copy(Available
-                   | std::views::transform([](const AvailableExpression &A) {
-                       return A.Assignment;
-                     })
-                   | std::views::filter([](const AssignType *A) {
-                       return A != nullptr;
-                     }),
-                 std::back_inserter(AssignsWhereIIsAvailable));
-      llvm::sort(AssignsWhereIIsAvailable,
-                 [&PO = ProgramOrdering](const AssignType *LHS,
-                                         const AssignType *RHS) {
-                   return PO.at(LHS) < PO.at(RHS);
-                 });
-
-      AssignType *SelectedAssign = nullptr;
-
-      bool UserMayWriteMemory = User->mayWriteToMemory();
-      if (not AssignsWhereIIsAvailable.empty()) {
-        if (not UserMayWriteMemory) {
-          // If the User of I cannot write to memory, we're fine.
-          // We can pick the CandidateAssign as SelectedAssign, and then we'll
-          // later replace U with a read from SelectedAssign.
-          revng_log(Log, "not User->mayWriteToMemory()");
-          SelectedAssign = AssignsWhereIIsAvailable.front();
-        } else {
-          revng_log(Log, "User->mayWriteToMemory()");
-          LoggerIndent IndentCandidate{ Log };
-
-          for (AssignType *CandidateAssign : AssignsWhereIIsAvailable) {
-            revng_log(Log,
-                      "CandidateAssign: " << dumpToString(CandidateAssign));
-            LoggerIndent MoreIndentCandidate{ Log };
-
-            if constexpr (IsLegacy) {
-              if (legacyLocalVariablesNoAlias(User, CandidateAssign)) {
-                revng_log(Log,
-                          "legacyLocalVariablesNoAlias(User, CandidateAssign)");
-                SelectedAssign = CandidateAssign;
-                break;
-              }
-              revng_log(Log,
-                        "no legacyLocalVariablesNoAlias(User, "
-                        "CandidateAssign)");
-            } else {
-              // If CandidateAssign accesses an alloca that doesn't leak, we can
-              // always select CandidateAssign as SelectedAssign
-              if (accessesAllocaThatDoesntLeak(CandidateAssign,
-                                               *AllocasThatDontLeak)) {
-                revng_log(Log, "accessesAllocaThatDoesntLeak(CandidateAssign)");
-                SelectedAssign = CandidateAssign;
-                break;
-              }
-
-              // Here User may write to memory. But it's not guaranteed that
-              // it's a StoreInst. It could be a call, taking a pointer
-              // argument, that writes to the pointee.
-              Value *AssignUserPointer = getStorePointerOperand<false>(User);
-
-              // If User is not a StoreInst, it's a call that writes memory.
-              // We cannot know what is the pointer operand, so we will not be
-              // able to reason about aliasing with CandidateAssign. We have to
-              // assume the worse, that they may alias, so CandidateAssign
-              // cannot be selected, and we try the next candidate.
-              // Unless CandidateAssign assigns an alloca that doesn't leak, but
-              // that's already been ruled out above.
-              if (not AssignUserPointer) {
-                revng_log(Log,
-                          "User is not an StoreInst, go to next "
-                          "CandidateAssign");
-                continue;
-              }
-              revng_log(Log,
-                        "AssignUserPointer: "
-                          << dumpToString(AssignUserPointer));
-
-              Value
-                *CandidatePointer = getPointerOperand<false>(CandidateAssign);
-              revng_assert(CandidatePointer);
-              revng_log(Log,
-                        "CandidatePointer: " << dumpToString(CandidatePointer));
-
-              // In principle, we could avoid using AA here.
-              // But doing that results in unnecessary self-assignments of local
-              // variables, i.e. suboptimal code generation, because we can
-              // reuse values held by other variables less often.
-              // Using AA allows to detect when we can reuse them more often.
-              // FIXME add unit tests to test for this case
-              llvm::LocationSize
-                CandidateSize = getAccessedSize(CandidateAssign);
-              llvm::LocationSize AssignedUserSize = getAccessedSize(User);
-              if (AA->isNoAlias(CandidatePointer,
-                                CandidateSize,
-                                AssignUserPointer,
-                                AssignedUserSize)) {
-                revng_log(Log,
-                          "AA->isNoAlias(CandidatePointer, AssignUserPointer)");
-                SelectedAssign = CandidateAssign;
-                break;
-              }
-              revng_log(Log,
-                        "no AA->isNoAlias(CandidatePointer, "
-                        "AssignUserPointer)");
-            }
-          }
-        }
+      // If the MemoryRead is available in U we're fine.
+      if (AvailableExpressions->isAvailableAt(MemoryRead, U)) {
+        revng_log(Log, "MemoryRead isAvailableAt(User)");
+        continue;
       }
+      revng_log(Log, "not MemoryRead isAvailableAt(User)");
 
+      AssignType *SelectedAssign = selectAssignment(I, U);
       if (not SelectedAssign) {
-        revng_log(Log, "no SelectedAssign. Serialize I due to User");
+        revng_log(Log, "SelectedAssign: nullptr");
+        revng_log(Log,
+                  "I is not available at User, neither directly nor via other "
+                  "assignments");
         rc_return serialize(I);
       }
-
-      revng_assert(SelectedAssign->mayWriteToMemory());
-
       revng_log(Log, "SelectedAssign: " << dumpToString(SelectedAssign));
 
-      // If the user is not writing to memory, it cannot clobber SelectedAssign.
-      // Just pick mark U to replace with SelectedAssign.
-      if (not UserMayWriteMemory) {
+      // If the user is not writing to memory, it cannot interact in any way
+      // with the memory written to by SelectedAssign.
+      // Just mark U to be replaced from a read from the location assigned by
+      // SelectedAssign.
+      if (not User->mayWriteToMemory()) {
         ToReplaceWithAvailable[&U] = SelectedAssign;
         continue;
       }
 
       revng_log(Log,
                 "UserMayWriteMemory and SelectedAssign->mayWriteToMemory()");
+      // The following is a workaround to avoid emitting self-assigments in C,
+      // which are perfectly fine semantically but ugly to see.
       if constexpr (IsLegacy) {
 
+        // If User is an Assign, and it assigns the same local variable as the
+        // SelectedAssign, replacing U with a Copy from the LocalVar assigned by
+        // SelectedAssign from Load from the variable that assigns the same
+        // local variable as the SelectedAssign, would turn User into a self
+        // assignment.
         if (auto *UserAssign = getCallToTagged(User, FunctionTags::Assign);
-            UserAssign and legacyLocalVariablesNoAlias(User, SelectedAssign)) {
+            UserAssign
+            and legacyLocalVariablesNoAlias(UserAssign, SelectedAssign)) {
           AssignToRemove.insert(UserAssign);
         } else {
+          // In all the other cases it's fine to replace U with a Copy from the
+          // LocalVar assigned by SelectedAssign
           ToReplaceWithAvailable[&U] = SelectedAssign;
         }
 
       } else {
 
+        // If User is a store, and it assigns the same location as the
+        // SelectedAssign, replacing U with a load from the alloca assigned by
+        // SelectedAssign would turn User into a self assignment.
         auto *UserAssign = dyn_cast<StoreInst>(User);
-        // If User is not an assignment, it must be a call that clobbers some
-        // memory, and we don't know what it clobbers.
-        // In any case, it should use SelecteAssign, in U.
-        if (not UserAssign) {
-          ToReplaceWithAvailable[&U] = SelectedAssign;
-          continue;
-        }
-
-        // Here we're trying to detect if User is a StoreInst that stores to the
-        // same local variable as SelectedAssign.
-        // If that happens we can erase User, because it would be redundant,
-        // being a self-assignment.
-        // In order to figure this out we use AA, looking for pointers that must
-        // alias, and that the two StoreInst are storing same-sized integer
-        // values.
-
-        Value *AssignUserValue = getStoreValueOperand<false>(User);
-        Type *UserValueType = AssignUserValue->getType();
-        if (not UserValueType->isIntegerTy()) {
-          ToReplaceWithAvailable[&U] = SelectedAssign;
-          continue;
-        }
-
-        Value *SelectValue = getStoreValueOperand<false>(SelectedAssign);
-        Type *SelectValueType = SelectValue->getType();
-        if (not SelectValueType->isIntegerTy()) {
-          ToReplaceWithAvailable[&U] = SelectedAssign;
-          continue;
-        }
-
-        unsigned SelectedBitWidth = SelectValueType->getIntegerBitWidth();
-        unsigned UserBitWidth = UserValueType->getIntegerBitWidth();
-        if (SelectedBitWidth != UserBitWidth) {
-          ToReplaceWithAvailable[&U] = SelectedAssign;
-          continue;
-        }
-
-        Value *SelectPointer = getStorePointerOperand<false>(SelectedAssign);
-        Value *AssignUserPointer = getStorePointerOperand<false>(User);
-
-        if (AA->isMustAlias(AssignUserPointer, SelectPointer))
+        if (UserAssign and assignSameLocation(UserAssign, SelectedAssign)) {
           AssignToRemove.insert(UserAssign);
-        else
+        } else {
+          // In all the other cases it's fine to replace U with a Copy from the
+          // LocalVar assigned by SelectedAssign
           ToReplaceWithAvailable[&U] = SelectedAssign;
+        }
       }
     }
 
@@ -1590,6 +1281,7 @@ private:
       rc_return false;
     }
 
+    // FIXME: can't we drop this? at least in non-legacy mode
     if (I == MemoryRead) {
       revng_log(Log, "I == MemoryRead");
       revng_assert(isSerializable(*I));
@@ -1600,6 +1292,51 @@ private:
     // just serialize I.
     revng_log(Log, "Some of I's users require MemoryRead to be serialized");
     rc_return serialize(I);
+  }
+
+  /// Returns an assignment where I is available at U
+  AssignType *selectAssignment(Instruction *I, Use &U) {
+    // If the MemoryRead is not available at U, it may still be the case that
+    // I itself is available at U, because it was stored into a pre-existing
+    // alloca.
+    auto Available = AvailableExpressions->getAvailableAt(I, U);
+    if (Available.empty()) {
+      revng_log(Log, "I is not available at User");
+      return nullptr;
+    }
+    revng_log(Log, "I is available at User");
+
+    // Here we have a bunch of places where I is available in U.
+    // We want to pick one, so that we will end up replacing the use of I in U
+    // with a load from there.
+
+    SmallVector<AssignType *> AssignsWhereIIsAvailable;
+    llvm::copy(Available
+                 | std::views::transform([](const AvailableExpression &A) {
+                     return A.Assignment;
+                   })
+                 | std::views::filter([](const AssignType *A) {
+                     return A != nullptr;
+                   }),
+               std::back_inserter(AssignsWhereIIsAvailable));
+
+    if (AssignsWhereIIsAvailable.empty())
+      return nullptr;
+
+    // Sort them in program order.
+    // This is not strictly necessary, but it ensures determinism in picking the
+    // candidate.
+    // TODO: is this better or worse as an heuristic as opposed to reverse
+    // program order, or possibly other heuristics?
+    llvm::sort(AssignsWhereIIsAvailable,
+               [&PO = ProgramOrdering](const AssignType *LHS,
+                                       const AssignType *RHS) {
+                 return PO.at(LHS) < PO.at(RHS);
+               });
+
+    AssignType *CandidateAssign = AssignsWhereIIsAvailable.front();
+    revng_log(Log, "First CandidateAssign: " << dumpToString(CandidateAssign));
+    return CandidateAssign;
   }
 
   void pickFrom(Instruction *I, Instruction *MemoryRead) {
@@ -1693,6 +1430,7 @@ private:
       return TheTypeMap.at(I);
     } else {
       auto *IType = I->getType();
+      // FIXME: remove restriction on IntOrPtrTy
       revng_assert(IType->isIntOrPtrTy());
       uint64_t ByteSize = 0ULL;
       if (IType->isIntegerTy()) {
@@ -1761,6 +1499,7 @@ bool VI<IsLegacy>::serializeToLocalVariable(Instruction *I) {
   revng_assert(not isCallToTagged(I, FunctionTags::IsRef));
 
   // Compute the model type returned from the call.
+  // FIXME: remove restriction on IntOrPtrTy
   revng_assert(I->getType()->isIntOrPtrTy());
   const model::UpcastableType &VariableType = getModelType(I);
 
@@ -1799,7 +1538,6 @@ void registerCommonAnalyses(FunctionAnalysisManager &FAM) {
 
   if constexpr (not IsLegacy) {
     FAM.registerPass([] { return llvm::registerAAAnalyses(); });
-    FAM.registerPass([] { return AllocasWhoseAddressDoesntLeak(); });
   }
   FAM.registerPass([] { return AvailableExpressionsAnalysis<IsLegacy>(); });
   FAM.registerPass([] { return InstructionToSerializePicker<IsLegacy>(); });

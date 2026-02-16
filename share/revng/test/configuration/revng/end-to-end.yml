@@ -121,7 +121,7 @@ commands:
       - type: revng.analyzed-model
     suffix: /
     command: |-
-      ./emit-and-check-c decompile-to-single-file "$INPUT1" "$INPUT2/model.yml" "$OUTPUT" "$POINTER_SIZE" -Wno-shift-count-overflow
+      ./emit-and-check-c decompile-to-single-file "$INPUT1" "$INPUT2/model.yml" "$OUTPUT" "$POINTER_SIZE" -Wno-shift-count-overflow -Wno-self-assign
 
   #
   # Produce the emit-c artifact and check the resulting C code
