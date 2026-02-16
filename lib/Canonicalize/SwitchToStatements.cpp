@@ -1209,6 +1209,10 @@ private:
       }
     }
 
+    // FIXME: the commit of ToReplaceWithAvailable and AssignToRemove should
+    // probably be postponed. In fact, shouldSerializeBeforeOrAtI should
+    // probably be const.
+
     // If we reach this point, it means that no user forced us to serialize I.
     // At this point we can commit ToReplaceWithAvailable into
     // Picked.ToReplaceWithAvailable.
