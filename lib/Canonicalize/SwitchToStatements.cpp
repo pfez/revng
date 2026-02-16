@@ -1089,24 +1089,20 @@ private:
 
     LoggerIndent Indent{ Log };
 
-    // FIXME TODO refactor me from here
-
     // If I has already been picked for serialization it means that I shouldn't
     // be serialied for it.
     if (isPickedToSerialize(I)) {
-      revng_log(Log, "isPickedToSerialize(I)");
+      revng_log(Log, "I isPickedToSerialize");
       rc_return false;
     }
 
-    // If it has side effects, we must have already picked it. Just return
-    // false.
+    // If it has side effects, we must have already picked it, unless it's not
+    // serializable. Just return false.
     if (hasSideEffects(I)) {
       revng_log(Log, "I hasSideEffects");
-      revng_assert(not isSerializable(*I) or isPickedToSerialize(I));
+      revng_assert(not isSerializable(*I));
       rc_return false;
     }
-
-    // FIXME TODO refactor me until here
 
     // If it exists a use U of I for which MemoryRead is not available, then
     // MemoryRead should be serialized before or at I, unless the whole
