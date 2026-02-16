@@ -1258,13 +1258,6 @@ private:
       rc_return false;
     }
 
-    // FIXME: can't we drop this? at least in non-legacy mode
-    if (I == MemoryRead) {
-      revng_log(Log, "I == MemoryRead");
-      revng_assert(isSerializable(*I));
-      rc_return serialize(I);
-    }
-
     // If some users of I require MemoryRead to be serialized before them,
     // just serialize I.
     revng_log(Log, "Some of I's users require MemoryRead to be serialized");
