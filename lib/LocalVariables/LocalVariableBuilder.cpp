@@ -301,10 +301,7 @@ VB::LocalVarType *VB::createLocalVariable(const model::Type &VariableType) {
   // VariableSize Int8Ty (alloca i8, n).
   // If we do the latter, LLVM's instcombine turns it into the former, but it
   // loses the variable type metadata that we need in the clifter.
-  llvm::ArrayType *Array = llvm::ArrayType::get(Types.Int8Ty, VariableSize);
-  auto *AllocaLocalVariable = B.CreateAlloca(Array);
-  setVariableTypeMetadata(AllocaLocalVariable, VariableType);
-  return AllocaLocalVariable;
+  return B.CreateAlloca(llvm::ArrayType::get(Types.Int8Ty, VariableSize));
 }
 
 template<>
