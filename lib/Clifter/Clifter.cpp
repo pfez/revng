@@ -1605,8 +1605,6 @@ private:
           Type = C.importType(*getStackTypeFromMetadata(Alloca, C.Model));
           Handle = pipeline::locationString(revng::ranks::StackFrameVariable,
                                             ModelFunction.Entry());
-        } else if (hasVariableTypeMetadata(Alloca)) {
-          Type = C.importType(*getVariableTypeFromMetadata(Alloca, C.Model));
         } else {
           Type = C.importLLVMType(Alloca->getAllocatedType());
 
