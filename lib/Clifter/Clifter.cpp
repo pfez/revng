@@ -4,6 +4,8 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/ScopeExit.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/GenericDomTree.h"
 
@@ -11,6 +13,7 @@
 #include "revng/ADT/RecursiveCoroutine.h"
 #include "revng/ADT/ScopedExchange.h"
 #include "revng/Clift/CliftDialect.h"
+#include "revng/Clift/CliftTypes.h"
 #include "revng/CliftImportModel/ImportModel.h"
 #include "revng/Clifter/Clifter.h"
 #include "revng/LocalVariables/LocalVariableHelpers.h"
@@ -254,6 +257,25 @@ private:
 
     if (auto *T = llvm::dyn_cast<llvm::ArrayType>(Type))
       return importLLVMArrayType(T);
+
+    if (auto *StructT = llvm::dyn_cast<llvm::StructType>(Type)) {
+      // FIXME we should actually do
+      // const llvm::StructLayout *Layout =
+      // DataLayout->getStructLayout(StructT); uint64_t StructByteSize =
+      // Layout->getSizeInBytes();
+      uint64_t StructByteSize = 0;
+      for (llvm::Type *FieldType : StructT->elements()) {
+        revng_assert(FieldType->isIntOrPtrTy());
+        uint64_t FieldByteSize = importLLVMType(FieldType).getByteSize();
+        StructByteSize += FieldByteSize;
+      }
+      revng_assert(StructByteSize);
+      auto CharType = clift::PrimitiveType::get(Context,
+                                                PrimitiveKind::NumberKind,
+                                                1,
+                                                /*IsConst=*/false);
+      return ArrayType::get(CharType, StructByteSize);
+    }
 
     revng_abort("Unsupported LLVM type");
   }
@@ -584,21 +606,6 @@ class ClifterImpl::FunctionClifter {
     bool HasAssignLabel = false;
   };
 
-  struct ValueMappingInfo {
-    mlir::Value Value;
-
-    // See ArgumentMappingInfo::TakeAddressOnUse for more information. However,
-    // instead of arguments, this one applies to return values stored in local
-    // variables. For some function calls the importer creates local variables
-    // with the model typing, and when the LLVM IR function call returned by
-    // address, the address of the variable must be taken to resolve the
-    // discrepancy in representation.
-    bool TakeAddressOnUse;
-
-    ValueMappingInfo(mlir::Value Value) :
-      Value(Value), TakeAddressOnUse(false) {}
-  };
-
   ClifterImpl &C;
 
   mlir::MLIRContext *const Context;
@@ -627,10 +634,14 @@ class ClifterImpl::FunctionClifter {
   // variable.
   llvm::DenseMap<const llvm::AllocaInst *, mlir::Value> AllocaMapping;
 
-  // Maps an arbitrary LLVM IR value to a Clift value description. During
-  // expression import some values are only emitted once and any use of such a
-  // value is emitted using the description stored in this table.
-  llvm::DenseMap<const llvm::Value *, ValueMappingInfo> ValueMapping;
+  // Maps an LLVM CallInst that returns SPTAR to the Clift LocalVariableOp that
+  // holds the return value.
+  // All LLVM uses of the CallInst use it as a pointer, as if it was pointing to
+  // the storage holding the return value. This is a hack, and should be avoided
+  // in the future. Until then, for the generation of uses of the SPTAR call in
+  // Clift, the address of the LocalVariablOp must be taken, to preserve
+  // semantic.
+  llvm::DenseMap<const llvm::Value *, mlir::Value> SPTARCallVariableMapping;
 
 public:
   static clift::FunctionOp import(ClifterImpl &C, const llvm::Function *F) {
@@ -715,11 +726,6 @@ private:
     auto UnderlyingTargetT = dealias(TargetType, true);
 
     if (UnderlyingSourceT.getByteSize() != UnderlyingTargetT.getByteSize())
-      return Value;
-
-    if (mlir::isa<ArrayType>(UnderlyingSourceT))
-      return Value;
-    if (mlir::isa<ArrayType>(UnderlyingTargetT))
       return Value;
 
     return emitCast(Loc, Value, TargetType);
@@ -843,29 +849,6 @@ private:
     rc_return Builder.create<AggregateOp>(Loc, T, Initializers);
   }
 
-  RecursiveCoroutine<mlir::Value>
-  emitOpaqueExtractValue(const llvm::CallInst *Call) {
-    mlir::Location Loc = C.getLocation(Call);
-
-    mlir::Value Aggregate = rc_recur emitExpression(Call->getArgOperand(0),
-                                                    Loc);
-
-    uint64_t Index = C.getConstantInt(Call->getArgOperand(1));
-    auto Struct = mlir::cast<StructType>(Aggregate.getType());
-    revng_assert(Index < Struct.getFields().size());
-
-    mlir::Type FieldType = Struct.getFields()[Index].getType();
-    mlir::Value FieldValue = Builder.create<AccessOp>(Loc,
-                                                      FieldType,
-                                                      Aggregate,
-                                                      /*indirect=*/false,
-                                                      Index);
-
-    rc_return emitImplicitCast(Loc,
-                               FieldValue,
-                               C.importLLVMType(Call->getType()));
-  }
-
   RecursiveCoroutine<mlir::Value> emitHelperCall(const llvm::CallInst *Call) {
     // TODO: Use getCalledFunction. Pending fix for uniqued-by-prototype issue.
     // const llvm::Function *Callee = Call->getCalledFunction();
@@ -876,9 +859,6 @@ private:
 
     if (Tags.contains(FunctionTags::StructInitializer))
       rc_return rc_recur emitStructInitializer(Call);
-
-    if (Tags.contains(FunctionTags::OpaqueExtractValue))
-      rc_return rc_recur emitOpaqueExtractValue(Call);
 
     mlir::Location Loc = C.getLocation(Call);
 
@@ -919,16 +899,15 @@ private:
       revng_abort("Unsupported global object kind");
     }
 
-    if (auto It = ValueMapping.find(V); It != ValueMapping.end()) {
+    if (auto It = SPTARCallVariableMapping.find(V);
+        It != SPTARCallVariableMapping.end()) {
       revng_log(ExpressionLog, "<existing value>");
 
-      mlir::Value Value = It->second.Value;
+      mlir::Value Value = It->second;
 
-      if (It->second.TakeAddressOnUse) {
-        Value = Builder.create<AddressofOp>(SurroundingLocation,
-                                            C.makePointerType(Value.getType()),
-                                            Value);
-      }
+      Value = Builder.create<AddressofOp>(SurroundingLocation,
+                                          C.makePointerType(Value.getType()),
+                                          Value);
 
       rc_return Value;
     }
@@ -993,17 +972,15 @@ private:
     if (auto I = llvm::dyn_cast<llvm::AllocaInst>(V)) {
       mlir::Location Loc = SurroundingLocation;
 
-      if (auto It = AllocaMapping.find(I); It != AllocaMapping.end()) {
-        revng_log(ExpressionLog, "llvm::AllocaInst");
-        LoggerIndent Indent(ExpressionLog);
+      revng_log(ExpressionLog, "llvm::AllocaInst");
+      LoggerIndent Indent(ExpressionLog);
 
-        auto Type = C.makePointerType(It->second.getType());
-        auto Value = Builder.create<AddressofOp>(Loc, Type, It->second);
-        rc_return emitImplicitCast(Loc, Value, C.importLLVMType(I->getType()));
-      }
+      auto It = AllocaMapping.find(I);
+      revng_assert(It != AllocaMapping.end());
 
-      revng_assert(not llvm::isa<llvm::Constant>(I->getArraySize()));
-      revng_abort("Non-constant alloca is not supported.");
+      auto Type = C.makePointerType(It->second.getType());
+      auto Value = Builder.create<AddressofOp>(Loc, Type, It->second);
+      rc_return emitImplicitCast(Loc, Value, C.importLLVMType(I->getType()));
     }
 
     if (auto I = llvm::dyn_cast<llvm::LoadInst>(V)) {
@@ -1397,7 +1374,8 @@ private:
           and GEP->getSourceElementType()->isIntegerTy(8)) {
 
         using PrimitiveKind::UnsignedKind;
-        auto PointerType = C.makePointerType(getPrimitiveType(1, UnsignedKind));
+        auto PointerType = C.makePointerType(C.getPrimitiveType(1,
+                                                                UnsignedKind));
 
         llvm::Value *GEPIndex = GEP->idx_begin()->get();
         mlir::Value Index = rc_recur emitExpression(GEPIndex, Loc);
@@ -1414,26 +1392,6 @@ private:
                                                                Loc),
                                        PointerType);
         rc_return emitExpr<PtrAddOp>(Loc, PointerType, Pointer, Index);
-      } else if (auto *A = llvm::dyn_cast<llvm::AllocaInst>(GEPPointerOp)) {
-
-        auto It = AllocaMapping.find(A);
-        revng_assert(It != AllocaMapping.end());
-
-        auto AT = mlir::dyn_cast<clift::ArrayType>(It->second.getType());
-        auto PointerType = C.makePointerType(AT.getElementType());
-
-        revng_assert(GEP->getNumIndices() == 2);
-        auto IndexIterator = GEP->idx_begin();
-
-        revng_assert(C.getConstantInt(IndexIterator->get()) == 0);
-        uint64_t Index = C.getConstantInt((++IndexIterator)->get());
-
-        auto Operand = emitCast(Loc, It->second, PointerType, CastKind::Decay);
-
-        mlir::Value Immediate = emitExpr<ImmediateOp>(Loc,
-                                                      C.getIntptrType(),
-                                                      Index);
-        rc_return emitExpr<PtrAddOp>(Loc, PointerType, Operand, Immediate);
       }
     }
 
@@ -1540,20 +1498,15 @@ private:
     Builder.create<GotoOp>(Loc, Iterator->second.Label);
   }
 
-  // Returns: { RequiresFullExpression, RequiresIndirection }
-  std::pair<bool, bool> requiresFullExpression(const llvm::CallInst *Call) {
-    if (Call->hasMetadata(PrototypeMDName)) {
-      const auto *ModelCallType = getCallSitePrototype(C.Model, Call);
-      auto Layout = abi::FunctionType::Layout::make(*ModelCallType);
-      namespace ReturnMethod = abi::FunctionType::ReturnMethod;
+  bool isCallToSPTAR(const llvm::CallInst *Call) {
+    if (not Call->hasMetadata(PrototypeMDName))
+      return false;
 
-      if (Layout.hasSPTAR())
-        return { true, true };
+    const auto *ModelCallType = getCallSitePrototype(C.Model, Call);
+    auto Layout = abi::FunctionType::Layout::make(*ModelCallType);
+    namespace ReturnMethod = abi::FunctionType::ReturnMethod;
 
-      return { Layout.returnMethod() == ReturnMethod::RegisterSet, false };
-    }
-
-    return { llvm::isa<llvm::StructType>(Call->getType()), false };
+    return Layout.hasSPTAR();
   }
 
   // This function emits a single basic block as part of a larger C scope.
@@ -1605,12 +1558,13 @@ private:
 
         clift::ValueType Type;
         if (hasStackTypeMetadata(Alloca)) {
-          Type = C.importModelType(*getStackTypeFromMetadata(Alloca, C.Model));
+          auto StackType = ModelFunction.stackFrameType();
+          revng_assert(StackType);
+          Type = cast<clift::StructType>(C.importModelType(*StackType));
           Handle = pipeline::locationString(revng::ranks::StackFrameVariable,
                                             ModelFunction.Entry());
         } else {
           Type = C.importLLVMType(Alloca->getAllocatedType());
-
           if (Alloca->isArrayAllocation())
             Type = ArrayType::get(Context, Type, C.getConstantInt(Size));
         }
@@ -1653,7 +1607,7 @@ private:
           continue;
 
         // Some function calls are emitted in local variable initializers.
-        if (auto [FE, Indirection] = requiresFullExpression(Call); FE) {
+        if (isCallToSPTAR(Call)) {
           mlir::Location Loc = C.getLocation(Call);
 
           auto Op = Builder.create<ExpressionStatementOp>(Loc);
@@ -1668,10 +1622,9 @@ private:
             return Builder.create<AssignOp>(Loc, Type, Local, Initializer);
           });
 
-          auto [Iterator, Inserted] = ValueMapping.try_emplace(Call, Local);
+          auto [_, Inserted] = SPTARCallVariableMapping.try_emplace(Call,
+                                                                    Local);
           revng_assert(Inserted);
-
-          Iterator->second.TakeAddressOnUse = Indirection;
           continue;
         }
       }
@@ -1891,11 +1844,7 @@ private:
     return LayoutArguments;
   }
 
-  clift::FunctionOp import(const llvm::Function *F) {
-    revng_assert(Function.getBody().empty());
-    mlir::Block &BodyBlock = Function.getBody().emplaceBlock();
-    Builder.setInsertionPointToEnd(&BodyBlock);
-
+  void initializeArgumentMapping(const llvm::Function *F) {
     llvm::ArrayRef LayoutArguments = getLayoutArguments(FunctionLayout);
     revng_assert(F->arg_size() == Function.getArgumentTypes().size());
     revng_assert(F->arg_size() == LayoutArguments.size());
@@ -1908,11 +1857,26 @@ private:
     // type. That type is imported here and stored in the argument description.
     for (const auto [A, T, L] :
          llvm::zip(F->args(), Function.getArgumentTypes(), LayoutArguments)) {
-      ArgumentMapping.try_emplace(&A,
-                                  BodyBlock.addArgument(T, Function->getLoc()),
-                                  /*TakeAddressOnUse=*/isByAddressParameter(L),
-                                  /*CastType=*/C.importLLVMType(A.getType()));
+      ArgumentMapping
+        .try_emplace(&A,
+                     getBodyBlock().addArgument(T, Function->getLoc()),
+                     /*TakeAddressOnUse=*/isByAddressParameter(L),
+                     /*CastType=*/C.importLLVMType(A.getType()));
     }
+  }
+
+  mlir::Block &getBodyBlock() {
+    revng_assert(Function);
+    revng_assert(Function.getBody().hasOneBlock());
+    return Function.getBody().getBlocks().front();
+  }
+
+  clift::FunctionOp import(const llvm::Function *F) {
+    revng_assert(Function.getBody().empty());
+    mlir::Block &BodyBlock = Function.getBody().emplaceBlock();
+    Builder.setInsertionPointToEnd(&BodyBlock);
+
+    initializeArgumentMapping(F);
 
     // Compute the scope graph. While the computation should not modify the
     // function IR, it is not const-correct and so a const_cast must be used.
