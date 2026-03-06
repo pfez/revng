@@ -54,8 +54,10 @@
 #include "revng/Model/FunctionTags.h"
 #include "revng/Model/IRHelpers.h"
 #include "revng/Model/LoadModelPass.h"
+#include "revng/Support/BlockType.h"
 #include "revng/Support/Debug.h"
 #include "revng/Support/DecompilationHelpers.h"
+#include "revng/Support/IRBuilder.h"
 
 static Logger Log{ "switch-to-statements" };
 
@@ -178,6 +180,11 @@ static const Value *getStoreValueOperand(const Instruction *I) {
 }
 
 template<bool IsLegacy>
+static bool isStoreValueOperand(const Use &U, const Instruction *I) {
+  return getStoreValueOperandUse<IsLegacy>(I) == &U;
+}
+
+template<bool IsLegacy>
 static Use *getLoadPointerOperandUse(Instruction *I) {
   if (not I)
     return nullptr;
@@ -277,32 +284,50 @@ static bool causesExponentialDataflowPaths(const Instruction *I) {
   return false;
 }
 
-static bool hasSideEffects(const Instruction *I) {
-  // TODO: this is a workaround. This should be split up in a separate pass to
-  // run before SwitchToStatements.
-  if (causesExponentialDataflowPaths(I))
-    return true;
-
-  if (I->mayHaveSideEffects()) {
-    revng_assert(isa<StoreInst>(I) or isa<CallInst>(I));
-    return true;
-  }
-  return false;
-}
-
-static bool mayReadMemory(const Instruction &I) {
+static bool doesNotAccessMemory(const Instruction &I) {
   // We have to hardcode revng_call_stack_arguments and revng_stack_frame
   // because SegregateStackAccesses has to mark them as functions that read
   // inaccessible memory, in order to prevent some LLVM optimizations.
+  // Same for OpaqueExtractValue.
   if (auto *Call = dyn_cast<CallInst>(&I)) {
     if (llvm::Function *Callee = getCalledFunction(Call)) {
       StringRef Name = Callee->getName();
       if (Name.startswith("revng_call_stack_arguments")
           or Name.startswith("revng_stack_frame")) {
-        return false;
+        return true;
       }
     }
+    if (getCallToTagged(&I, FunctionTags::OpaqueExtractValue))
+      return true;
+    if (getCallToTagged(&I, FunctionTags::StructInitializer))
+      return true;
   }
+  return false;
+}
+
+static bool mayHaveSideEffects(const Instruction *I) {
+  // FIXME split this
+  // TODO: this is a workaround. This should be split up in a separate pass to
+  // run before SwitchToStatements.
+  if (causesExponentialDataflowPaths(I))
+    return true;
+
+  if (doesNotAccessMemory(*I))
+    return false;
+
+  return I->mayHaveSideEffects();
+}
+
+static bool mayWriteToMemory(const Instruction &I) {
+  if (doesNotAccessMemory(I))
+    return false;
+
+  return I.mayWriteToMemory();
+}
+
+static bool mayReadMemory(const Instruction &I) {
+  if (doesNotAccessMemory(I))
+    return false;
 
   return I.mayReadFromMemory();
 }
@@ -566,8 +591,8 @@ void AEMFP<IsLegacy>::applyTransferFunctionImpl(Instruction *I,
                  and not isCallToTagged(I, FunctionTags::Assign));
   }
 
-  if (hasSideEffects(I)) {
-    revng_log(Log, "hasSideEffects");
+  if (mayHaveSideEffects(I)) {
+    revng_log(Log, "mayHaveSideEffects");
     LoggerIndent XX{ Log };
     for (const AvailableExpression &A : llvm::make_early_inc_range(E)) {
       const auto &[Available, Assign] = A;
@@ -699,7 +724,7 @@ static bool isProgramPoint(const Instruction *I) {
     revng_abort("Unexpected Instruction");
   }
 
-  return I == &I->getParent()->front() or hasSideEffects(I)
+  return I == &I->getParent()->front() or mayHaveSideEffects(I)
          or mayReadMemory(*I);
 }
 
@@ -825,7 +850,7 @@ public:
   auto getAvailableAt(Instruction *I, const Instruction *Where) const {
 
     revng_log(Log, "IsAvailableAt");
-    revng_log(Log, "I: " << dumpToString(I));
+    revng_log(Log, "Available?: " << dumpToString(I));
     revng_log(Log, "Where: " << dumpToString(Where));
 
     auto ProgramPointIt = ProgramPoint.find(Where);
@@ -1001,23 +1026,21 @@ public:
 private:
   bool isSerializable(const Instruction &I) const {
     const llvm::Type *T = I.getType();
-    // FIXME: in non-legacy mode, only void should be non-serializable
-    return not T->isVoidTy() and not T->isAggregateType()
-           and not isCallToTagged(&I, FunctionTags::IsRef);
+    if constexpr (IsLegacy) {
+      return not T->isVoidTy() and not T->isAggregateType()
+             and not isCallToTagged(&I, FunctionTags::IsRef);
+    } else {
+      return not T->isVoidTy();
+    }
   }
 
-  bool serialize(llvm::Instruction *I) {
+  void pick(llvm::Instruction *I) {
     LoggerIndent Indent{ Log };
-    if (isSerializable(*I)) {
-      revng_log(Log, "serialize(I), I: " << dumpToString(I));
-      Picked.ToSerialize.insert(I);
-      return false;
-    }
-    revng_log(Log, "serialize(I), can't serialize I: " << dumpToString(I));
-    return true;
+    revng_log(Log, "pick(I), I: " << dumpToString(I));
+    Picked.ToSerialize.insert(I);
   };
 
-  bool isPickedToSerialize(llvm::Instruction *I) const {
+  bool isPicked(llvm::Instruction *I) const {
     return Picked.ToSerialize.contains(I);
   }
 
@@ -1027,21 +1050,23 @@ private:
 
     // Visit in RPO for determinism
     const auto RPO = llvm::ReversePostOrderTraversal(&F);
+    size_t NextOrder = 0;
+    for (BasicBlock *BB : RPO)
+      for (Instruction &I : *BB)
+        ProgramOrdering[&I] = NextOrder++;
 
     // First, pick all the statements amenable for serialization
     // Also compute the program order of instructions.
-    {
+    if constexpr (IsLegacy) {
       revng_log(Log,
-                "pick for serialization instructions with hasSideEffects: "
+                "pick for serialization instructions with mayHaveSideEffects: "
                   << F.getName().str());
       LoggerIndent MoreIndent{ Log };
-      size_t NextOrder = 0;
+
       for (BasicBlock *BB : RPO) {
         for (Instruction &I : *BB) {
-          ProgramOrdering[&I] = NextOrder++;
-
           // If it's not a statement, don't pick it.
-          if (not hasSideEffects(&I))
+          if (not mayHaveSideEffects(&I))
             continue;
 
           // If it's a statement but it's not serializable, don't pick it.
@@ -1055,7 +1080,7 @@ private:
           // local variables that don't escape. Inlining it would have the
           // effect of postponing a write, which is something that we haven't
           // ever considered to do.
-          serialize(&I);
+          pick(&I);
         }
       }
     }
@@ -1065,7 +1090,7 @@ private:
     for (BasicBlock *BB : RPO)
       for (Instruction &I : *BB)
         if (mayReadMemory(I))
-          pickFrom(&I, &I);
+          pickInstructionForMemoryRead(&I, &I);
 
     return Picked;
   }
@@ -1082,36 +1107,97 @@ private:
     return AA->isMustAlias(XPointer, YPointer);
   }
 
-  RecursiveCoroutine<bool>
-  shouldSerializeReadBeforeOrAtI(Instruction *I, Instruction *MemoryRead) {
+  RecursiveCoroutine<void>
+  pickInstructionForMemoryRead(Instruction *I, Instruction *MemoryRead) {
     revng_log(Log, "PickFrom I: " << dumpToString(I));
     revng_log(Log, "MemoryRead: " << dumpToString(MemoryRead));
 
     LoggerIndent Indent{ Log };
 
-    // If I has already been picked for serialization it means that I shouldn't
-    // be serialied for it.
-    if (isPickedToSerialize(I)) {
-      revng_log(Log, "I isPickedToSerialize");
-      rc_return false;
+    // If I has already been picked we'de done.
+    if (isPicked(I)) {
+      revng_log(Log, "I isPicked");
+      rc_return;
     }
 
-    // If it has side effects, we must have already picked it, unless it's not
-    // serializable. Just return false.
-    if (hasSideEffects(I)) {
-      revng_log(Log, "I hasSideEffects");
-      revng_assert(not isSerializable(*I));
-      rc_return false;
+    if constexpr (IsLegacy) {
+      // If it has side effects, we must have already picked it, unless it's not
+      // serializable. Just return.
+      if (mayHaveSideEffects(I)) {
+        revng_log(Log, "mayHaveSideEffects(I)");
+        revng_assert(not isSerializable(*I));
+        rc_return;
+      }
+      revng_log(Log, "not mayHaveSideEffects(I)");
     }
 
-    // If it exists a use U of I for which MemoryRead is not available, then
-    // MemoryRead should be serialized before or at I, unless the whole
-    // expression represented by I is available somewhere else.
     revng_log(Log, "Check users");
     LoggerIndent UserIndent{ Log };
 
     MapVector<Use *, AssignType *> ToReplaceWithAvailable;
     SmallPtrSet<AssignType *, 8> AssignToRemove;
+    SmallVector<Use *> UsesToRecurOn;
+
+    // If we're here, I hasn't been picked for serialization yet.
+    // If possible we want to avoid picking it, because our broader goal is to
+    // serialize as few instructions as possible.
+    //
+    // We can avoid serializing I if one of the following applies.
+    //
+    // 1.
+    // MemoryRead is available directly in all uses of I. In this case I can be
+    // emitted inline in each of its uses, and MemoryRead will be inlined along
+    // with I in every use of I, without breaking semantics.
+    // We can avoid serializing I, and recur.
+    //
+    // 2.
+    // For each use U of I where MemoryRead is not available directly,
+    // MemoryRead is available indirectly via some assignment S that stored it
+    // somewhere.
+    // In this case, for each of such use U, we want to make sure that if we
+    // inline I in U we will not use MemoryRead directly, but replace the
+    // transitive use of MemoryRead in I with a load from the same location as
+    // S.
+    // However, in practice we have a guarantee that this holds, thanks to
+    // recursion. Indeed, if we're reached this place via recursion we must have
+    // already processed the transitive use of MemoryRead in I, and we have
+    // solved that part of the problem earlier. This means can be sure that
+    // whenever we emit I, if MemoryRead is not available directly at I but only
+    // via an assignment S, we have already set up things so that we will use a
+    // load from S instead of MemoryRead directly to emit I.
+    // So we can avoid serializing I, and recur.
+    //
+    // 3.
+    // For each use U of I where MemoryRead is not available, I happens to be
+    // available instead. I can be available directly (A) or indirectly (B) i.e.
+    // via some assignment S that assigned it to some location, where the value
+    // of I is still available.
+    //
+    // 3.A.
+    // I is available directly at U. If we inline I directly in U we will end up
+    // inlining MemoryRead as well, which unfortunately is not available, so we
+    // would break semantic.
+    // So in practice we cannot handle this case gracefully and we have to fall
+    // back to case 3.B and hope it is also available indirectly.
+    //
+    // 3.B.
+    // MemoryRead is not available at U.
+    // I is available indirectly at U via an assignment S.
+    //
+    // If we're looking at how I is used in U, it means that we've already
+    // processed how MemoryRead is used in I, hence by construction the
+    // expression that will be emitted in S to compute the value of I will
+    // already use the correct value of MemoryRead, either directly or from
+    // another assignment T that assigns before I and makes it available
+    // indirectly at I.
+    //
+    // As a result, we just mark the use U to be replaced with the value of I
+    // available at S.
+    //
+    // FIXME: here we also have explain the special case of AssignToRemove
+    //
+    // 4. If MemoryRead is not available at U and I is not available at U, we
+    // have to bail out and serialize I.
 
     // For each U Use of I where MemoryRead is not available, check if the
     // whole expression represented by I is available at U. If so add it to
@@ -1122,44 +1208,49 @@ private:
     // variable.
     for (Use &U : I->uses()) {
       auto *User = cast<Instruction>(U.getUser());
-      revng_log(Log, "User: " << dumpToString(User));
+      revng_log(Log,
+                "UseNo: " << U.getOperandNo()
+                          << " User: " << dumpToString(User));
       LoggerIndent MoreUserIndent{ Log };
 
+      // FIXME: let's try to remove this
       // Skip over the Assign operand representing variables that are being
       // assigned, because we need to preserve them.
       if (isStorePointerOperand<IsLegacy>(U, User)) {
-        revng_log(Log, "I isAssignedOperand(User)");
+        revng_log(Log, "isStorePointerOperand(U, User)");
+        UsesToRecurOn.push_back(&U);
         continue;
       }
-      revng_log(Log, "not I isAssignedOperand(User)");
+
+      // Case 1. and 2. of the description above.
+      // If the MemoryRead is available in U either directly or via an
+      // assignment S we're fine and we start looking at the next use.
+      if (AvailableExpressions->isAvailableAt(MemoryRead, U)) {
+        revng_log(Log, "isAvailableAt(MemoryRead, User)");
+        UsesToRecurOn.push_back(&U);
+        continue;
+      }
+      revng_log(Log, "not isAvailableAt(MemoryRead, User)");
 
       // The same use U of I could have already been picked in a previous
       // iteration, from a different memory read.
       // Detect that case and quickly bail out.
       // In practice we have already taken that decision and we will reuse that.
-      if (auto It = Picked.ToReplaceWithAvailable.find(&U);
-          It != Picked.ToReplaceWithAvailable.end()) {
+      if (Picked.ToReplaceWithAvailable.count(&U)) {
         revng_log(Log,
-                  "I is available at User, reading from address: "
-                    << dumpToString(It->second));
+                  "I is available at User, reading from: "
+                    << dumpToString(Picked.ToReplaceWithAvailable.lookup(&U)));
+        UsesToRecurOn.push_back(&U);
         continue;
       }
-      revng_log(Log, "Find where I is available");
 
-      // If the MemoryRead is available in U we're fine.
-      if (AvailableExpressions->isAvailableAt(MemoryRead, U)) {
-        revng_log(Log, "MemoryRead isAvailableAt(User)");
-        continue;
-      }
-      revng_log(Log, "not MemoryRead isAvailableAt(User)");
+      revng_log(Log, "Find where I is available");
 
       AssignType *SelectedAssign = selectAssignment(I, U);
       if (not SelectedAssign) {
         revng_log(Log, "SelectedAssign: nullptr");
-        revng_log(Log,
-                  "I is not available at User, neither directly nor via other "
-                  "assignments");
-        rc_return serialize(I);
+        revng_log(Log, "I is not available at User via other assignments");
+        rc_return pick(I);
       }
       revng_log(Log, "SelectedAssign: " << dumpToString(SelectedAssign));
 
@@ -1167,13 +1258,14 @@ private:
       // with the memory written to by SelectedAssign.
       // Just mark U to be replaced from a read from the location assigned by
       // SelectedAssign.
-      if (not User->mayWriteToMemory()) {
+      if (not mayWriteToMemory(*User)) {
         ToReplaceWithAvailable[&U] = SelectedAssign;
+        revng_log(Log, "not mayWriteToMemory(User)");
+        UsesToRecurOn.push_back(&U);
         continue;
       }
+      revng_log(Log, "mayWriteToMemory(User)");
 
-      revng_log(Log,
-                "UserMayWriteMemory and SelectedAssign->mayWriteToMemory()");
       // The following is a workaround to avoid emitting self-assigments in C,
       // which are perfectly fine semantically but ugly to see.
       if constexpr (IsLegacy) {
@@ -1187,10 +1279,13 @@ private:
             UserAssign
             and legacyLocalVariablesNoAlias(UserAssign, SelectedAssign)) {
           AssignToRemove.insert(UserAssign);
+          // FIXME: should we recur on this
+          // UsesToRecurOn.push_back(&U);
         } else {
           // In all the other cases it's fine to replace U with a Copy from the
           // LocalVar assigned by SelectedAssign
           ToReplaceWithAvailable[&U] = SelectedAssign;
+          UsesToRecurOn.push_back(&U);
         }
 
       } else {
@@ -1201,17 +1296,16 @@ private:
         auto *UserAssign = dyn_cast<StoreInst>(User);
         if (UserAssign and assignSameLocation(UserAssign, SelectedAssign)) {
           AssignToRemove.insert(UserAssign);
+          // FIXME: should we recur on this
+          // UsesToRecurOn.push_back(&U);
         } else {
           // In all the other cases it's fine to replace U with a Copy from the
           // LocalVar assigned by SelectedAssign
           ToReplaceWithAvailable[&U] = SelectedAssign;
+          UsesToRecurOn.push_back(&U);
         }
       }
     }
-
-    // FIXME: the commit of ToReplaceWithAvailable and AssignToRemove should
-    // probably be postponed. In fact, shouldSerializeBeforeOrAtI should
-    // probably be const.
 
     // If we reach this point, it means that no user forced us to serialize I.
     // At this point we can commit ToReplaceWithAvailable into
@@ -1223,45 +1317,23 @@ private:
     for (const auto &Assign : AssignToRemove)
       Picked.AssignToRemove.insert(Assign);
 
-    // If we reach this point I is has not been picked for serialization yet, it
-    // isn't a statement, and MemoryRead is available to all users of I either
-    // directly or through some other local variable where the whole I is
-    // available.
-    // We have to recur in DFS fashion only on those uses for which we're using
-    // MemoryRead directly (not through another local variable where I is
-    // available).
-    SmallSet<Instruction *, 8> UsersThatRequireMemoryReadSerialized;
-    revng_log(Log, "recur on users that aren't available");
-    for (Use &TheUse : I->uses()) {
-
-      if (auto It = Picked.ToReplaceWithAvailable.find(&TheUse);
-          It != Picked.ToReplaceWithAvailable.end()) {
-        revng_log(Log,
-                  "TheUse is available: " << dumpToString(TheUse.getUser()));
-        continue;
-      }
-
-      User *TheUser = TheUse.getUser();
-
-      auto *UserInstruction = cast<Instruction>(TheUser);
-      if (rc_recur shouldSerializeReadBeforeOrAtI(UserInstruction, MemoryRead))
-        UsersThatRequireMemoryReadSerialized.insert(UserInstruction);
+    // If we reach this point I is has not been picked for serialization, and
+    // MemoryRead is available to all users of I, either directly of via some
+    // other local variable where the whole I is available.
+    // Hence, we can safely decide that I will not be picked.
+    // We still have to check all users of I that are using MemoryRead directly
+    // (transitively via I). Those may still be picked.
+    revng_log(Log, "Recur on users of I");
+    for (Use *U : UsesToRecurOn) {
+      auto *User = cast<Instruction>(U->getUser());
+      LoggerIndent UserIndent{ Log };
+      revng_log(Log,
+                "UseNo: " << U->getOperandNo()
+                          << " User: " << dumpToString(User));
+      LoggerIndent MoreUserIndent{ Log };
+      rc_recur pickInstructionForMemoryRead(User, MemoryRead);
     }
-
-    size_t NumUsersRequiringSerialization = UsersThatRequireMemoryReadSerialized
-                                              .size();
-
-    // If no users require MemoryRead to be serialized before them, there's
-    // nothing to do, and I doesn't require MemoryRead to be serialized either.
-    if (NumUsersRequiringSerialization == 0) {
-      revng_log(Log, "No User requires MemoryRead to be serialized");
-      rc_return false;
-    }
-
-    // If some users of I require MemoryRead to be serialized before them,
-    // just serialize I.
-    revng_log(Log, "Some of I's users require MemoryRead to be serialized");
-    rc_return serialize(I);
+    rc_return;
   }
 
   /// Returns an assignment where I is available at U
@@ -1275,6 +1347,13 @@ private:
       return nullptr;
     }
     revng_log(Log, "I is available at User");
+    if (Log.isEnabled()) {
+      LoggerIndent Indent{ Log };
+      for (const AvailableExpression &AE : Available) {
+        revng_log(Log, "AE.Available = " << dumpToString(AE.Expression));
+        revng_log(Log, "AE.Assignment = " << dumpToString(AE.Assignment));
+      }
+    }
 
     // Here we have a bunch of places where I is available in U.
     // We want to pick one, so that we will end up replacing the use of I in U
@@ -1307,10 +1386,6 @@ private:
     AssignType *CandidateAssign = AssignsWhereIIsAvailable.front();
     revng_log(Log, "First CandidateAssign: " << dumpToString(CandidateAssign));
     return CandidateAssign;
-  }
-
-  void pickFrom(Instruction *I, Instruction *MemoryRead) {
-    shouldSerializeReadBeforeOrAtI(I, MemoryRead);
   }
 };
 
@@ -1398,27 +1473,6 @@ private:
   bool serializeToLocalVariable(Instruction *I);
 
   bool shouldReplaceUseWithCopies(const Instruction *I, const Use &U) const;
-
-  model::UpcastableType getModelType(const Instruction *I) const {
-    if constexpr (IsLegacy) {
-      return TheTypeMap.at(I);
-    } else {
-      auto *IType = I->getType();
-      // FIXME: remove restriction on IntOrPtrTy
-      revng_assert(IType->isIntOrPtrTy());
-      uint64_t ByteSize = 0ULL;
-      if (IType->isIntegerTy()) {
-        unsigned NumBits = IType->getIntegerBitWidth();
-        revng_assert(NumBits);
-        revng_assert(NumBits == 1 or (NumBits % 8 == 0));
-        ByteSize = (NumBits == 1) ? 1 : (NumBits / 8);
-      } else {
-        ByteSize = I->getModule()->getDataLayout().getPointerSize();
-      }
-      return model::PrimitiveType::make(model::PrimitiveKind::Generic,
-                                        ByteSize);
-    }
-  }
 };
 
 template<bool IsLegacy>
@@ -1472,16 +1526,30 @@ bool VI<IsLegacy>::serializeToLocalVariable(Instruction *I) {
   // variables because C doesn't have references.
   revng_assert(not isCallToTagged(I, FunctionTags::IsRef));
 
-  // Compute the model type returned from the call.
-  // FIXME: remove restriction on IntOrPtrTy
-  revng_assert(I->getType()->isIntOrPtrTy());
-  const model::UpcastableType &VariableType = getModelType(I);
-
   // First, we have to declare the LocalVariable, always at the entry block.
   // Create instruction that allocates a LocalVariable
-  LocalVarType<IsLegacy> *LocalVariable = VariableBuilder
-                                            .createLocalVariable(*VariableType);
-  LocalVariable->setDebugLoc(I->getDebugLoc());
+  LocalVarType<IsLegacy> *LocalVariable = nullptr;
+
+  if constexpr (IsLegacy) {
+    revng_assert(I->getType()->isIntOrPtrTy());
+    const model::UpcastableType &VariableType = TheTypeMap.at(I);
+    LocalVariable = VariableBuilder.createLocalVariable(*VariableType);
+    LocalVariable->setDebugLoc(I->getDebugLoc());
+  } else {
+    revng::NonDebugInfoCheckingIRBuilder B(F.getContext());
+    B.SetInsertPointPastAllocas(&F, I->getDebugLoc());
+
+    auto *IType = I->getType();
+    if (auto *TheStructType = dyn_cast<StructType>(IType)) {
+      const DataLayout &DL = F.getParent()->getDataLayout();
+      const StructLayout *Layout = DL.getStructLayout(TheStructType);
+      uint64_t ByteSize = Layout->getSizeInBytes();
+      auto *Int8Ty = llvm::IntegerType::getInt8Ty(B.getContext());
+      LocalVariable = B.CreateAlloca(llvm::ArrayType::get(Int8Ty, ByteSize));
+    } else {
+      LocalVariable = B.CreateAlloca(IType);
+    }
+  }
 
   // Then, we have to replace all the uses of I so that they make a Copy
   // from the LocalVariable, unless it's a call to an IsolatedFunction that

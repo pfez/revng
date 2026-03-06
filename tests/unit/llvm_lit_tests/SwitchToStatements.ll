@@ -46,13 +46,13 @@ define i64 @a_swapped(ptr %arg) {
 ; Arguments and globals may alias.
 ; =================================
 
-; Function argument doesn't alias the @segment global.
+; Function argument may alias the @segment global.
 ; A new local variable should be created, and the result of the load should be
 ; stored in there.
 ; The the ret instruction should load from there again.
 ;
 ; CHECK-LABEL: define i64 @b
-; CHECK: [[ALLOCA:%[a-zA-Z0-9_]+]] = alloca [8 x i8], align 1, !revng.variable_type
+; CHECK: [[ALLOCA:%[a-zA-Z0-9_]+]] = alloca i64
 ; CHECK-NEXT: [[LOADED_VALUE:%[a-zA-Z0-9_]+]] = load i64, ptr %arg
 ; CHECK-NEXT: store i64 [[LOADED_VALUE]], ptr [[ALLOCA]]
 ; CHECK-NEXT: store i64 7, ptr @segment
@@ -65,7 +65,7 @@ define i64 @b(ptr %arg) {
   ret i64 %loaded_value
 }
 
-; Function argument doesn't alias the @segment global.
+; Function argument may alias the @segment global.
 ; A new local variable should be created, and the result of the load should be
 ; stored in there.
 ; The the ret instruction should load from there again.
@@ -73,7 +73,7 @@ define i64 @b(ptr %arg) {
 ; This is the same as the previous test, but with segment and argument swapped.
 ;
 ; CHECK-LABEL: define i64 @b_swapped
-; CHECK: [[ALLOCA:%[a-zA-Z0-9_]+]] = alloca [8 x i8], align 1, !revng.variable_type
+; CHECK: [[ALLOCA:%[a-zA-Z0-9_]+]] = alloca i64
 ; CHECK-NEXT: [[LOADED_VALUE:%[a-zA-Z0-9_]+]] = load i64, ptr @segment
 ; CHECK-NEXT: store i64 [[LOADED_VALUE]], ptr [[ALLOCA]]
 ; CHECK-NEXT: store i64 7, ptr %arg
@@ -161,3 +161,53 @@ define i32 @d_argument(ptr %arg) {
   store i32 7, ptr %arg_at_4
   ret i32 %fifteen
 }
+
+
+; ============================================================================
+; LLVM struct types are not special.
+; ============================================================================
+
+%s = type { i32, i32 }
+
+; Function argument may alias the @segment global.
+; A new local variable should be created, and the result of the load should be
+; stored in there.
+; The the ret instruction should load from there again.
+;
+; CHECK-LABEL: define %s @s
+; CHECK: [[ALLOCA:%[a-zA-Z0-9_]+]] = alloca [8 x i8]
+; CHECK-NEXT: [[LOADED_VALUE:%[a-zA-Z0-9_]+]] = load %s, ptr %arg
+; CHECK-NEXT: store %s [[LOADED_VALUE]], ptr [[ALLOCA]]
+; CHECK-NEXT: store i64 7, ptr @segment
+; CHECK-NEXT: [[RESULT:%[a-zA-Z0-9_]+]] = load %s, ptr [[ALLOCA]]
+; CHECK-NEXT: ret %s [[RESULT]]
+
+define %s @s(ptr %arg) {
+  %loaded_value = load %s, ptr %arg
+  store i64 7, ptr @segment
+  ret %s %loaded_value
+}
+
+; Function argument may alias the @segment global.
+; A new local variable should be created, and the result of the load should be
+; stored in there.
+; The the ret instruction should load from there again.
+;
+; This is the same as the previous test, but with segment and argument swapped.
+;
+; CHECK-LABEL: define %s @s_swapped
+; CHECK: [[ALLOCA:%[a-zA-Z0-9_]+]] = alloca [8 x i8]
+; CHECK-NEXT: [[LOADED_VALUE:%[a-zA-Z0-9_]+]] = load %s, ptr @segment
+; CHECK-NEXT: store %s [[LOADED_VALUE]], ptr [[ALLOCA]]
+; CHECK-NEXT: store i64 7, ptr %arg
+; CHECK-NEXT: [[RESULT:%[a-zA-Z0-9_]+]] = load %s, ptr [[ALLOCA]]
+; CHECK-NEXT: ret %s [[RESULT]]
+
+define %s @s_swapped(ptr %arg) {
+  %loaded_value = load %s, ptr @segment
+  store i64 7, ptr %arg
+  ret %s %loaded_value
+}
+
+;; We should test that a call that returns a struct and an store of it into an
+;; array-typed alloca don't create an additional struct typed local variable
