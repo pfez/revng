@@ -1129,6 +1129,13 @@ private:
         rc_return;
       }
       revng_log(Log, "not mayHaveSideEffects(I)");
+    } else {
+      // FIXME explain
+      if (mayHaveSideEffects(MemoryRead) and I->getNumUses() > 1) {
+        revng_log(Log, "I may have side effects, and has many uses");
+        pick(I);
+        rc_return;
+      }
     }
 
     revng_log(Log, "Check users");
