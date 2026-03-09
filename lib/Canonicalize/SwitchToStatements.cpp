@@ -1225,7 +1225,10 @@ private:
       // assigned, because we need to preserve them.
       if (isStorePointerOperand<IsLegacy>(U, User)) {
         revng_log(Log, "isStorePointerOperand(U, User)");
-        UsesToRecurOn.push_back(&U);
+        // In principle we should do:
+        // UsesToRecurOn.push_back(&U);
+        // But that would just do nothing because Store instructions can't have
+        // any Use. So we can just continue here.
         continue;
       }
 
