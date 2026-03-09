@@ -684,8 +684,8 @@ Branches:
               - ternary-reduction
               - exit-ssa
               - arithmetic-to-gep
-              - switch-to-statements
               - extractvalue-to-gep
+              - switch-to-statements
               - remove-constant-array-returns
               - dagify
               - inline-divergent-scopes
