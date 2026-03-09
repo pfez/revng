@@ -1335,12 +1335,20 @@ private:
     // (transitively via I). Those may still be picked.
     revng_log(Log, "Recur on users of I");
     for (Use *U : UsesToRecurOn) {
+
       auto *User = cast<Instruction>(U->getUser());
       LoggerIndent UserIndent{ Log };
       revng_log(Log,
                 "UseNo: " << U->getOperandNo()
                           << " User: " << dumpToString(User));
       LoggerIndent MoreUserIndent{ Log };
+      // FIXME explain
+      if (auto *Call = dyn_cast<CallInst>(User)) {
+        if (Call->isArgOperand(U)) {
+          revng_log(Log, "User is CallInst and User->isArgOperand(U)");
+          continue;
+        }
+      }
       rc_recur pickInstructionForMemoryRead(User, MemoryRead);
     }
     rc_return;
