@@ -313,6 +313,8 @@ const std::set<llvm::StringRef> ReservedKeywords = {
   "typeof",
   "__typeof__",
   "bit_cast",
+  "bit_cast_to_array",
+  "assign_array",
 };
 
 /// Returns `true` iff the identifier is exactly the given prefix + a decimal
