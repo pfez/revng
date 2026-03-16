@@ -68,7 +68,6 @@ bool ExtractValueToGEPPass::runOnFunction(llvm::Function &F) {
   for (Instruction *StructValue : StructValues) {
     auto *TheStructType = cast<StructType>(StructValue->getType());
     const StructLayout *Layout = DL.getStructLayout(TheStructType);
-    uint64_t ByteSize = Layout->getSizeInBytes();
 
     Value *BasePointer = nullptr;
     if (auto *Load = dyn_cast<LoadInst>(StructValue)) {
@@ -76,7 +75,7 @@ bool ExtractValueToGEPPass::runOnFunction(llvm::Function &F) {
     } else {
       DebugLoc DebugInfo = StructValue->getDebugLoc();
       B.SetInsertPointPastAllocas(&F, DebugInfo);
-      BasePointer = B.CreateAlloca(llvm::ArrayType::get(Int8Ty, ByteSize));
+      BasePointer = B.CreateAlloca(TheStructType);
 
       B.SetInsertPoint(StructValue->getInsertionPointAfterDef(), DebugInfo);
       B.CreateStore(StructValue, BasePointer);
