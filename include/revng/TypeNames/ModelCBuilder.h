@@ -554,6 +554,21 @@ public:
                                         Actions);
   }
 
+
+  /// Special case handling for the opaque types.
+  template<bool IsDefinition>
+  std::string
+  getOpaqueTypeDeclarationTag(uint64_t ByteSize) const {
+    constexpr std::array<llvm::StringRef, 0> Actions = {};
+    auto Location = pipeline::locationString(revng::ranks::OpaqueType,
+                                             ByteSize);
+
+    std::string Name = NameBuilder.opaqueTypeName(ByteSize);
+    return getNameTagImpl<IsDefinition>(tokenTag(Name, ptml::c::tokens::Type),
+                                        Location,
+                                        Actions);
+  }
+
   /// Special case handling for helper functions.
   template<bool IsDefinition>
   std::string getHelperFunctionTag(llvm::StringRef Name) const {
