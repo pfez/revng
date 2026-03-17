@@ -321,3 +321,67 @@ void ptml::ModelCBuilder::printTypeDefinitions() {
     revng_log(TypePrinterLog, "PostOrder DONE");
   }
 }
+
+void ptml::ModelCBuilder::printOpaqueTypeDefinition(uint64_t ByteSize) {
+
+  std::string StructLine = getKeyword(ptml::CBuilder::Keyword::Struct) + " "
+                           + ptml::Attributes.getAttributeString<"_PACKED">()
+                           + " "
+                           + ptml::Attributes.getAnnotationString<"_SIZE">(ByteSize)
+                           + " "
+                           + getOpaqueTypeDeclarationTag</*IsDefinition*/ true>(ByteSize) + " ";
+  {
+    Scope Scope(*Out, ptml::c::scopes::StructBody);
+    printPadding(0, ByteSize);
+  }
+
+  *Out << ";\n";
+}
+
+
+void ptml::ModelCBuilder::printOpaqueTypeDefinitions() {
+
+  std::set<uint64_t> ByteSizes = { 1, 2, 4, 8, 10, 12, 16 };
+
+  for (const model::UpcastableTypeDefinition &Type : Binary.TypeDefinitions()) {
+    uint64_t ByteSize = Type->size().value_or(0);
+    if (ByteSize)
+      ByteSizes.insert(ByteSize);
+
+    llvm::SmallVector<model::UpcastableType> Dependencies;
+
+    if (const auto *S = Type->getStruct())
+      for (const auto &Field : S->Fields())
+        Dependencies.push_back(Field.Type());
+
+    if (const auto *U = Type->getUnion())
+      for (const auto &Field : U->Fields())
+        Dependencies.push_back(Field.Type());
+
+    if (const auto *R = Type->getRawFunction()) {
+      for (const auto &A : R->Arguments())
+        Dependencies.push_back(A.Type());
+      for (const auto &RV : R->ReturnValues())
+        Dependencies.push_back(RV.Type());
+    }
+
+    if (const auto *C = Type->getCABIFunction()) {
+      for (const auto &A : C->Arguments())
+        Dependencies.push_back(A.Type());
+      Dependencies.push_back(C->ReturnType());
+    }
+
+    // FIXME TODO: deps for arrays and pointers
+
+    for (const model::UpcastableType &D : Dependencies)
+      if (uint64_t ByeSize = D->trySize().value_or(0))
+        ByteSizes.insert(ByteSize);
+  }
+
+
+  for (uint64_t ByteSize : ByteSizes) {
+    printOpaqueTypeDefinition(ByteSize);
+    *Out << "\n";
+  }
+
+}

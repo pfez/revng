@@ -861,6 +861,12 @@ public:
   /// on every type, as types can depend on each other.
   /// This method ensures they are printed in a valid order.
   void printTypeDefinitions();
+
+  /// Print all opaque type definitions required by the types in the model.
+  void printOpaqueTypeDefinitions();
+
+private:
+  void printOpaqueTypeDefinition(uint64_t ByteSize);
 };
 
 } // namespace ptml

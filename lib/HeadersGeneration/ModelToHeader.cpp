@@ -136,5 +136,18 @@ bool ptml::HeaderBuilder::printModelHeader() {
     B.append("\n");
   }
 
+  {
+    B.appendLineComment("\\defgroup Opaque Types");
+    B.appendLineComment("\\{");
+
+    auto Scope = B.getScopeTag(ptml::tags::Div);
+
+    B.printOpaqueTypeDefinitions();
+
+    B.append("\n");
+    B.appendLineComment("\\}");
+    B.append("\n");
+  }
+
   return true;
 }
