@@ -244,6 +244,9 @@ private:
                                     Function.key(),
                                     Argument.key());
   }
+  std::string locationString(uint64_t ByteSize) const {
+    return pipeline::locationString(revng::ranks::OpaqueType, ByteSize);
+  }
 
 private:
   std::string variableLocationString(const model::Function &Function,
