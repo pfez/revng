@@ -486,6 +486,15 @@ public:
     assertNameIsReserved(Result);
     return Result;
   }
+
+  [[nodiscard]] std::string
+  opaqueTypeName(uint64_t ByteSize) const {
+    auto Result = Configuration.OpaqueTypePrefix() + std::to_string(ByteSize);
+    assertNameIsReserved(Result);
+    return Result;
+  }
+
+
 };
 
 struct CNameBuilder : public NameBuilder<CNameBuilder> {
