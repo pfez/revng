@@ -68,53 +68,53 @@ const model::TypeDefinition *Common<CRTP>::getPrototype() const {
 }
 
 template<typename CRTP>
-model::TypeDefinition *Common<CRTP>::getRawFunction() {
+model::RawFunctionDefinition *Common<CRTP>::getRawFunction() {
   model::Type *U = skipTypedefs();
   if (U && U->isConst())
     return nullptr;
 
   if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
-    if (llvm::isa<model::RawFunctionDefinition>(Definition))
-      return Definition;
+    if (auto *RFD = llvm::dyn_cast<model::RawFunctionDefinition>(Definition))
+      return RFD;
 
   return nullptr;
 }
 
 template<typename CRTP>
-const model::TypeDefinition *Common<CRTP>::getRawFunction() const {
+const model::RawFunctionDefinition *Common<CRTP>::getRawFunction() const {
   const model::Type *U = skipTypedefs();
   if (U && U->isConst())
     return nullptr;
 
   if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
-    if (llvm::isa<model::RawFunctionDefinition>(Definition))
-      return Definition;
+    if (auto *RFD = llvm::dyn_cast<model::RawFunctionDefinition>(Definition))
+      return RFD;
 
   return nullptr;
 }
 
 template<typename CRTP>
-model::TypeDefinition *Common<CRTP>::getCABIFunction() {
+model::CABIFunctionDefinition *Common<CRTP>::getCABIFunction() {
   model::Type *U = skipTypedefs();
   if (U && U->isConst())
     return nullptr;
 
   if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
-    if (llvm::isa<model::CABIFunctionDefinition>(Definition))
-      return Definition;
+    if (auto *CFD = llvm::dyn_cast<model::CABIFunctionDefinition>(Definition))
+      return CFD;
 
   return nullptr;
 }
 
 template<typename CRTP>
-const model::TypeDefinition *Common<CRTP>::getCABIFunction() const {
+const model::CABIFunctionDefinition *Common<CRTP>::getCABIFunction() const {
   const model::Type *U = skipTypedefs();
   if (U && U->isConst())
     return nullptr;
 
   if (auto *Definition = U ? U->tryGetAsDefinition() : tryGetAsDefinition())
-    if (llvm::isa<model::CABIFunctionDefinition>(Definition))
-      return Definition;
+    if (auto *CFD = llvm::dyn_cast<model::CABIFunctionDefinition>(Definition))
+      return CFD;
 
   return nullptr;
 }
