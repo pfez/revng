@@ -2,16 +2,48 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <set>
+
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinOps.h"
 
+#include "revng/Clift/CliftAttributes.h"
+#include "revng/Clift/CliftTypes.h"
+#include "revng/Clift/ModuleVisitor.h"
 #include "revng/CliftEmitC/CEmitter.h"
 #include "revng/CliftEmitC/Headers.h"
 #include "revng/CliftEmitC/TypeDefinitionEmitter.h"
 #include "revng/CliftEmitC/TypeDependencyGraph.h"
+#include "revng/CliftImportModel/ImportModel.h"
 #include "revng/PTML/CTokenEmitter.h"
 #include "revng/Pipeline/Location.h"
 #include "revng/Pipes/Ranks.h"
+
+class OpaqueTypeSizeCollector
+  : public clift::ModuleVisitor<OpaqueTypeSizeCollector> {
+private:
+  using Base = clift::ModuleVisitor<OpaqueTypeSizeCollector>;
+
+private:
+  std::set<uint64_t> &Result;
+
+public:
+  OpaqueTypeSizeCollector(std::set<uint64_t> &Result) : Result(Result) {
+    revng_assert(Result.empty());
+
+    // TODO: do not hard-code this list here. Instead, share it with the model
+    //       verification logic (the only other current user of this).
+    Result = { 1, 2, 4, 8, 10, 12, 16 };
+  }
+
+  mlir::LogicalResult visitType(mlir::Type Type) {
+    // FUTURE-WIP: anything more smart I should do here?
+    if (uint64_t Size = clift::getObjectSizeOrZero(Type))
+      Result.emplace(Size);
+
+    return mlir::success();
+  }
+};
 
 class CHeaderEmitterImpl : TypeDefinitionEmitter {
 
@@ -133,6 +165,28 @@ public:
     });
   }
 
+  void emitOpaqueTypes(mlir::ModuleOp Module) {
+    emitCategoryComment("Opaque types");
+
+    for (uint64_t Size : collectModelOpaqueByteSizes(Module)) {
+      auto Struct = clift::makeOpaqueStruct(*Module.getContext(), Size);
+      emitClassDefinition(Struct);
+      emitTypeDeclaration(Struct);
+    }
+
+    Tokens.emitNewline();
+  }
+
+private:
+  std::set<uint64_t> collectModelOpaqueByteSizes(mlir::ModuleOp Module) {
+    std::set<uint64_t> Result;
+
+    auto R = OpaqueTypeSizeCollector::visit(Module, Result);
+    revng_assert(R.succeeded());
+
+    return Result;
+  }
+
 public:
   void emitHelpers(llvm::ArrayRef<mlir::ModuleOp> Modules) {
     // TODO: emit `#include`s
@@ -178,7 +232,8 @@ public:
 
 void emitTypeAndGlobalHeader(ptml::CTokenEmitter &Tokens,
                              mlir::ModuleOp Module,
-                             TypeEmitterConfiguration Configuration) {
+                             TypeEmitterConfiguration Configuration,
+                             bool DefineOpaqueTypes) {
   CHeaderEmitterImpl Emitter(Tokens,
                              clift::getDataModel(Module),
                              Configuration);
@@ -191,6 +246,9 @@ void emitTypeAndGlobalHeader(ptml::CTokenEmitter &Tokens,
   Emitter.emitFunctions(Module);
   Emitter.emitDynamicFunctions(Module);
   Emitter.emitSegments(Module);
+
+  if (DefineOpaqueTypes)
+    Emitter.emitOpaqueTypes(Module);
 }
 
 void emitHelperHeader(ptml::CTokenEmitter &Tokens,
