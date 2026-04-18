@@ -44,9 +44,11 @@ emitTypeAndGlobalHeaderImpl(llvm::raw_ostream &Out,
   Out.flush();
 }
 
-static void emitHelperHeaderImpl(llvm::raw_ostream &Out,
-                                 std::vector<mlir::ModuleOp> Modules) {
-  ptml::CTokenEmitter Tokens(Out, ptml::Tagging::Enabled);
+static void
+emitHelperHeaderImpl(llvm::raw_ostream &Out,
+                     std::vector<mlir::ModuleOp> Modules,
+                     ptml::Tagging Tagging = ptml::Tagging::Enabled) {
+  ptml::CTokenEmitter Tokens(Out, Tagging);
   emitHelperHeader(Tokens, Modules);
 
   Out.flush();
@@ -197,7 +199,10 @@ void EmitHelperHeader::run() {
   for (const auto &Object : Input.objects())
     FunctionModules.emplace_back(Input.getModule(Object));
 
-  emitHelperHeaderImpl(*Out, FunctionModules);
+  emitHelperHeaderImpl(*Out,
+                       FunctionModules,
+                       Configuration.DisableMarkup ? ptml::Tagging::Disabled :
+                                                     ptml::Tagging::Enabled);
 }
 
 using ESTD = EmitSingleTypeDefinition;
