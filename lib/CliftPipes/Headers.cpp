@@ -25,15 +25,17 @@
 // Shared logic
 //
 
-static void emitTypeAndGlobalHeaderImpl(llvm::raw_ostream &Out,
-                                        mlir::ModuleOp Module) {
+static void
+emitTypeAndGlobalHeaderImpl(llvm::raw_ostream &Out,
+                            mlir::ModuleOp Module,
+                            ptml::Tagging Tagging = ptml::Tagging::Enabled) {
   TypeEmitterConfiguration Configuration = {
     .TypeToOmit = {},
     .EmitMaximumEnumValue = false,
     .ExplicitPadding = true,
   };
 
-  ptml::CTokenEmitter Tokens(Out, ptml::Tagging::Enabled);
+  ptml::CTokenEmitter Tokens(Out, Tagging);
   emitTypeAndGlobalHeader(Tokens,
                           Module,
                           Configuration,
@@ -181,7 +183,11 @@ namespace revng::pypeline::piperuns {
 
 void EmitTypeAndGlobalHeader::run() {
   std::unique_ptr<llvm::raw_ostream> Out = Output.getOStream(ObjectID());
-  emitTypeAndGlobalHeaderImpl(*Out, Input.getModule());
+  emitTypeAndGlobalHeaderImpl(*Out,
+                              Input.getModule(),
+                              Configuration.DisableMarkup ?
+                                ptml::Tagging::Disabled :
+                                ptml::Tagging::Enabled);
 }
 
 void EmitHelperHeader::run() {
