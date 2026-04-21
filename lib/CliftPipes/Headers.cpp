@@ -110,12 +110,7 @@ static void emitTypeDefinitionImpl(llvm::raw_ostream &Out,
                                ptml::Tagging::Disabled :
                                ptml::Tagging::Enabled);
 
-  mlir::MLIRContext &Context = *Module.getContext();
-  auto EmitError = [&Context]() -> mlir::InFlightDiagnostic {
-    return Context.getDiagEngine().emit(mlir::UnknownLoc::get(&Context),
-                                        mlir::DiagnosticSeverity::Error);
-  };
-  auto CliftType = clift::importType(EmitError, &Context, Type);
+  auto CliftType = clift::importType(Module.getContext(), Type);
   revng_check(CliftType != nullptr);
 
   // FUTURE-WIP: @fez, one more problem with reimporting types - we need to
