@@ -504,6 +504,7 @@ Branches:
               - operatorprecedence-resolution
               - pretty-int-formatting
               - discard-broken-debug-information
+              - strip-dead-prototypes
       - Name: embed-statement-comments
         Pipes:
           - Type: embed-statement-comments
@@ -695,6 +696,7 @@ Branches:
               - inline-divergent-scopes
               - enforce-single-exit
               - materialize-trivial-goto
+              - strip-dead-prototypes
           - Type: clifter
             UsedContainers: [functions.bc.zstd, functions.mlir]
           - Type: clift-optimization
