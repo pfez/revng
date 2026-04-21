@@ -43,7 +43,7 @@ public:
       llvm::StringRef String(Buffer.data(), Buffer.size());
       auto NewModule = mlir::parseSourceString<mlir::ModuleOp>(String, Config);
       revng_assert(NewModule);
-      revng_assert(clift::hasModuleAttr(NewModule.get()));
+      revng_assert(clift::isCliftModule(NewModule.get()));
       Modules[*Object] = std::move(NewModule);
     }
   }
@@ -122,7 +122,7 @@ public:
       llvm::StringRef String(Buffer.data(), Buffer.size());
       auto NewModule = mlir::parseSourceString<mlir::ModuleOp>(String, Config);
       revng_assert(NewModule);
-      revng_assert(clift::hasModuleAttr(NewModule.get()));
+      revng_assert(clift::isCliftModule(NewModule.get()));
       Modules[*Object] = std::move(NewModule);
     }
   }
@@ -209,7 +209,7 @@ public:
       llvm::StringRef String(Buffer.data(), Buffer.size());
       Module = mlir::parseSourceString<mlir::ModuleOp>(String, Config);
       revng_assert(Module);
-      revng_assert(clift::hasModuleAttr(Module.get()));
+      revng_assert(clift::isCliftModule(Module.get()));
     }
   }
 
