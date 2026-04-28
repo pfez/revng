@@ -20,6 +20,7 @@
 #include "revng/CliftImportModel/ImportModel.h"
 #include "revng/Clifter/Clifter.h"
 #include "revng/LocalVariables/LocalVariableHelpers.h"
+#include "revng/Model/Architecture.h"
 #include "revng/Model/Binary.h"
 #include "revng/Model/FunctionTags.h"
 #include "revng/Model/IRHelpers.h"
@@ -172,6 +173,14 @@ private:
   IntegerType getIntegerType(uint64_t Size,
                              IntegerKind Kind = IntegerKind::Generic) const {
     return IntegerType::get(Context, Kind, Size);
+  }
+
+  uint64_t getModelPointerSize() const {
+    return model::Architecture::getPointerSize(Model.Architecture());
+  }
+
+  mlir::Type getModelPointerType(mlir::Type ElementType) const {
+    return PointerType::get(ElementType, getModelPointerSize());
   }
 
   uint64_t getPointerSize() const {
@@ -806,8 +815,16 @@ private:
   template<typename OpT>
   mlir::Value
   emitCast(mlir::Location Loc, mlir::Value Value, mlir::Type TargetType) {
-    if (Value.getType() != TargetType)
-      Value = Builder.create<OpT>(Loc, TargetType, Value);
+    if (Value.getType() != TargetType) {
+      OpT X = Builder.create<OpT>(Loc, TargetType, Value);
+      if constexpr (std::is_same_v<OpT, BitCastOp>) {
+        auto ValueSize = unwrapped_cast<ValueType>(Value.getType())
+                           .getObjectSize();
+        auto TargetSize = unwrapped_cast<ValueType>(TargetType).getObjectSize();
+        revng_assert(ValueSize == TargetSize);
+      }
+      return X;
+    }
 
     return Value;
   }
@@ -1025,11 +1042,17 @@ private:
       revng_assert(It != ArgumentMapping.end());
 
       mlir::Value Value = It->second.Argument;
+      bool TakeAddressOnUse = It->second.TakeAddressOnUse;
+      mlir::Type ArgumentUseType = It->second.CastType;
 
-      if (It->second.TakeAddressOnUse) {
-        Value = Builder.create<AddressofOp>(SurroundingLocation,
-                                            C.getPointerType(Value.getType()),
-                                            Value);
+      if (TakeAddressOnUse) {
+        uint64_t UseSize = unwrapped_cast<IntegerType>(ArgumentUseType)
+                             .getObjectSize();
+        revng_assert(C.getModelPointerSize() == UseSize);
+        Value = Builder
+                  .create<AddressofOp>(SurroundingLocation,
+                                       C.getModelPointerType(Value.getType()),
+                                       Value);
       }
 
       rc_return emitImplicitBitcast(SurroundingLocation,
@@ -1416,7 +1439,7 @@ private:
         if (isByAddressParameter(L)) {
           Argument = emitImplicitBitcast(Loc,
                                          Argument,
-                                         C.getPointerType(T));
+                                         C.getModelPointerType(T));
           Argument = Builder.create<IndirectionOp>(Loc, T, Argument);
         } else {
           Argument = emitImplicitBitcast(Loc, Argument, T);
@@ -1792,6 +1815,33 @@ private:
             ReturnValue = Builder.create<IndirectionOp>(TerminalLoc,
                                                         LLVMReturnType,
                                                         ReturnValue);
+          }
+
+          if (FunctionLayout.hasSPTAR()) {
+            // TODO: This may happen when the pointer size of the Model doesn't
+            // match the pointer size on LLVM IR, due to mismatching DataLayout.
+            // SPTAR functions return model-pointer-sized integers, with the
+            // semantic is to actually return the pointee by copy.
+            // Given that the return value is model-pointer-sized, it's size
+            // doesn't necessarily match the pointer size in LLVM's DataLayout.
+            // Until we don't solve the broader issue of LLVM's DataLayout
+            // mismatching the pointer size of the input binary and the Model,
+            // we'll have to deal with this corner case.
+            // Another option would be to change SPTAR function to return
+            // llvm-pointer-sized integers or even LLVM's pointers, instead of
+            // model-pointer-sized integers.
+            uint64_t
+              LLVMPointerSize = unwrapped_cast<PointerType>(LLVMReturnType)
+                                  .getObjectSize();
+            uint64_t ModelPointerSize = C.getModelPointerSize();
+            uint64_t OperandSize = unwrapped_cast<IntegerType>(ReturnValue
+                                                                 .getType())
+                                     .getObjectSize();
+            revng_assert(ModelPointerSize == OperandSize);
+            if (ModelPointerSize != LLVMPointerSize)
+              ReturnValue = emitIntegerCast(TerminalLoc,
+                                            ReturnValue,
+                                            LLVMPointerSize);
           }
 
           // Emit an implicit cast to the required return type if necessary:
