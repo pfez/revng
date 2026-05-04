@@ -12,7 +12,7 @@
 #include "revng/Support/GzipTarFile.h"
 #include "revng/Support/ResourceFinder.h"
 
-// FUTURE-WIP: I didn't make the old pipeline version, is it even worth it at
+// WIP: I didn't make the old pipeline version, is it even worth it at
 //      this point?
 
 void revng::pypeline::piperuns::EmitCAsDirectory::run() {
