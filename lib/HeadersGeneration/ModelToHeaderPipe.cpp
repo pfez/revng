@@ -26,8 +26,7 @@ void ModelToHeader::run() {
     B(*Out,
       Binary,
       /* EnableTaglessMode = */ false,
-      { .EnableStackFrameInlining = revng::options::EnableStackFrameInlining,
-        .EnablePrintingOfTheMaximumEnumValue = true,
+      { .EnablePrintingOfTheMaximumEnumValue = true,
         .ExplicitTargetPointerSize = getExplicitPointerSize(Binary) });
   ptml::HeaderBuilder(B).printModelHeader(/*DefineOpaqueTypes*/ true);
   Out->flush();
