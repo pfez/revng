@@ -15,6 +15,7 @@
 #include "revng/CliftPipes/CliftContainer.h"
 #include "revng/CliftPipes/Headers.h"
 #include "revng/PTML/CTokenEmitter.h"
+#include "revng/PTML/PTMLEmitter.h"
 #include "revng/Pipeline/RegisterPipe.h"
 
 #include "HeaderContainers.h"
@@ -23,17 +24,39 @@
 // Shared logic
 //
 
-static void
-emitTypeAndGlobalHeaderImpl(llvm::raw_ostream &Out,
-                            mlir::ModuleOp Module,
-                            ptml::Tagging Tagging = ptml::Tagging::Enabled) {
+using EmissionStyle = revng::pypeline::piperuns::EmissionStyle;
+using PipeConfiguration = revng::pypeline::piperuns::CEmissionPipeConfiguration;
+
+static void emitTypeAndGlobalHeaderImpl(llvm::raw_ostream &Out,
+                                        mlir::ModuleOp Module,
+                                        PipeConfiguration *PipeCfg = nullptr) {
   TypeEmitterConfiguration Configuration = {
     .TypeToOmit = {},
     .EmitMaximumEnumValue = false,
     .ExplicitPadding = true,
   };
 
-  ptml::CTokenEmitter Tokens(Out, Tagging);
+  if (PipeCfg) {
+    switch (PipeCfg->Mode) {
+    case EmissionStyle::Editable:
+      Configuration.EmitMaximumEnumValue = true;
+      Configuration.ExplicitPadding = false;
+      break;
+
+    case EmissionStyle::Recompilable:
+      Configuration.EmitMaximumEnumValue = false;
+      Configuration.ExplicitPadding = true;
+      break;
+
+    default:
+      revng_abort("Unsupported emission style.");
+    };
+  }
+
+  ptml::CTokenEmitter Tokens(Out,
+                             PipeCfg && PipeCfg->DisableMarkup ?
+                               ptml::Tagging::Disabled :
+                               ptml::Tagging::Enabled);
   emitTypeAndGlobalHeader(Tokens,
                           Module,
                           Configuration,
@@ -56,8 +79,34 @@ static void emitTypeDefinitionImpl(llvm::raw_ostream &Out,
                                    mlir::ModuleOp Module,
                                    const CDataModel &DataModel,
                                    const model::TypeDefinition &Type,
-                       ptml::Tagging Tagging = ptml::Tagging::Enabled) {
-  ptml::CTokenEmitter Tokens(Out, Tagging);
+                                   PipeConfiguration *PipeCfg = nullptr) {
+  TypeEmitterConfiguration Configuration = {
+    .TypeToOmit = {},
+    .EmitMaximumEnumValue = true,
+    .ExplicitPadding = false,
+  };
+
+  if (PipeCfg) {
+    switch (PipeCfg->Mode) {
+    case EmissionStyle::Editable:
+      Configuration.EmitMaximumEnumValue = true;
+      Configuration.ExplicitPadding = false;
+      break;
+
+    case EmissionStyle::Recompilable:
+      Configuration.EmitMaximumEnumValue = false;
+      Configuration.ExplicitPadding = true;
+      break;
+
+    default:
+      revng_abort("Unsupported emission style.");
+    };
+  }
+
+  ptml::CTokenEmitter Tokens(Out,
+                             PipeCfg && PipeCfg->DisableMarkup ?
+                               ptml::Tagging::Disabled :
+                               ptml::Tagging::Enabled);
 
   mlir::MLIRContext &Context = *Module.getContext();
   auto EmitError = [&Context]() -> mlir::InFlightDiagnostic {
@@ -66,12 +115,6 @@ static void emitTypeDefinitionImpl(llvm::raw_ostream &Out,
   };
   auto CliftType = clift::importType(EmitError, &Context, Type);
   revng_check(CliftType != nullptr);
-
-  TypeEmitterConfiguration Configuration = {
-    .TypeToOmit = {},
-    .EmitMaximumEnumValue = true,
-    .ExplicitPadding = false,
-  };
 
   emitSingleTypeDefinition(Tokens, DataModel, CliftType, Configuration);
 
@@ -178,11 +221,7 @@ namespace revng::pypeline::piperuns {
 
 void EmitTypeAndGlobalHeader::run() {
   std::unique_ptr<llvm::raw_ostream> Out = Output.getOStream(ObjectID());
-  emitTypeAndGlobalHeaderImpl(*Out,
-                              Input.getModule(),
-                              Configuration.DisableMarkup ?
-                                ptml::Tagging::Disabled :
-                                ptml::Tagging::Enabled);
+  emitTypeAndGlobalHeaderImpl(*Out, Input.getModule(), &Configuration);
 }
 
 void EmitHelperHeader::run() {
@@ -200,14 +239,15 @@ void EmitHelperHeader::run() {
 
 using ESTD = EmitSingleTypeDefinition;
 void ESTD::runOnTypeDefinition(const model::UpcastableTypeDefinition &Type) {
+  auto DataModel = abi::getDataModel(Binary);
+
   revng_assert(Type);
   auto Stream = Output.getOStream(ObjectID(Type->key()));
   emitTypeDefinitionImpl(*Stream,
                          Input.getModule(),
+                         DataModel,
                          *Type,
-                         Binary,
-                         Configuration.DisableMarkup ? ptml::Tagging::Disabled :
-                                                       ptml::Tagging::Enabled);
+                         &Configuration);
 }
 
 } // namespace revng::pypeline::piperuns
