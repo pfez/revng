@@ -276,4 +276,9 @@ void emitHelperHeader(ptml::CTokenEmitter &Tokens,
 
   Emitter.emitHeaderPrologue();
   Emitter.emitHelpers(Modules);
+
+  // This trick is practically a `const_cast`.
+  mlir::MLIRContext &Context = *mlir::ModuleOp(Modules.front()).getContext();
+
+  Emitter.emitOpaqueTypes(Context, Emitter.collectOpaqueByteSizes(Modules));
 }
