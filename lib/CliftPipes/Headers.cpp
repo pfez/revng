@@ -8,6 +8,7 @@
 
 #include "revng/ABI/Definition.h"
 #include "revng/Clift/Clift.h"
+#include "revng/Clift/CliftAttrInterfaces.h"
 #include "revng/Clift/CliftTypeInterfaces.h"
 #include "revng/CliftEmitC/CEmitter.h"
 #include "revng/CliftEmitC/CSemantics.h"
@@ -108,6 +109,10 @@ static void emitTypeDefinitionImpl(llvm::raw_ostream &Out,
                                ptml::Tagging::Disabled :
                                ptml::Tagging::Enabled);
 
+  Module.dump();
+
+  clift::importDescriptiveInfo(Binary, Module);
+
   // TODO: Extend `importType` to be able to signal whether a type already
   //       exists or if it was reimported.
   auto CliftType = clift::importType(Module.getContext(), Type);
@@ -116,7 +121,14 @@ static void emitTypeDefinitionImpl(llvm::raw_ostream &Out,
   // FUTURE-WIP: @fez, one more problem with reimporting types - we need to
   //             reimport names too. Despite the fact that they were *already*
   //             imported by the previous pipe!
-  clift::importDescriptiveInfo(Binary, Module);
+  // clift::importDescriptiveInfo(Binary, Module);
+  if (mlir::cast<clift::DefinedType>(CliftType)
+        .getMutableName()
+        .getValue()
+        .empty()) {
+    CliftType.dump();
+    revng_abort();
+  }
 
   const CDataModel &DataModel = clift::getDataModel(Module);
   emitSingleTypeDefinition(Tokens, DataModel, CliftType, Configuration);
