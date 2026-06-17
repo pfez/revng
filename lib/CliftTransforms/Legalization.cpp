@@ -440,14 +440,17 @@ mlir::LogicalResult clift::legalizeForC(clift::FunctionOp Function) {
   Set.add<ArithmeticPromotionPattern<AddOp>>(Context, DataModel);
   Set.add<ArithmeticPromotionPattern<SubOp>>(Context, DataModel);
   Set.add<ArithmeticPromotionPattern<MulOp>>(Context, DataModel);
-  Set.add<ArithmeticPromotionPattern<DivOp>>(Context, DataModel);
-  Set.add<ArithmeticPromotionPattern<RemOp>>(Context, DataModel);
+  Set.add<ArithmeticPromotionPattern<SDivOp>>(Context, DataModel);
+  Set.add<ArithmeticPromotionPattern<UDivOp>>(Context, DataModel);
+  Set.add<ArithmeticPromotionPattern<SRemOp>>(Context, DataModel);
+  Set.add<ArithmeticPromotionPattern<URemOp>>(Context, DataModel);
   Set.add<ArithmeticPromotionPattern<BitwiseNotOp>>(Context, DataModel);
   Set.add<ArithmeticPromotionPattern<BitwiseAndOp>>(Context, DataModel);
   Set.add<ArithmeticPromotionPattern<BitwiseOrOp>>(Context, DataModel);
   Set.add<ArithmeticPromotionPattern<BitwiseXorOp>>(Context, DataModel);
-  Set.add<ShiftPromotionPattern<ShiftLeftOp>>(Context, DataModel);
-  Set.add<ShiftPromotionPattern<ShiftRightOp>>(Context, DataModel);
+  Set.add<ShiftPromotionPattern<ShlOp>>(Context, DataModel);
+  Set.add<ShiftPromotionPattern<ShrOp>>(Context, DataModel);
+  Set.add<ShiftPromotionPattern<SarOp>>(Context, DataModel);
 
   // Literal typing
   Set.add<ImmediateCastPattern>(Context, DataModel);

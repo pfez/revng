@@ -70,6 +70,8 @@ set(FILECHECK_TESTS
     clift/c-semantics/eq-i16.mlir
     clift/c-semantics/imm-i16.mlir
     clift/c-semantics/indirection-p32.mlir
+    clift/c-semantics/signed-shr.mlir
+    clift/c-semantics/unsigned-sar.mlir
     clift/canonicalization/label-with-goto.mlir
     clift/canonicalization/label-without-goto.mlir
     clift/comments/0-import-types/CABIFunctionType.yml
