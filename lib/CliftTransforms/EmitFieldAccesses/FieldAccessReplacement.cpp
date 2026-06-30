@@ -249,6 +249,10 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
   //       give better results.
   mlir::Location PointerToReplaceLoc = PointerToReplace.getLoc();
 
+  auto IntPtrType = clift::IntegerType::get(Builder.getContext(),
+                                            IntegerKind::Generic,
+                                            PointerSize);
+
   // Apply each field access in sequence
   // Iterate over every `FieldAccess` in `Replacement`, and materialize the
   // `clift` `Operation`s needed to perform such access
@@ -297,48 +301,48 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
       // (or a bare `imm` when the index has no variable part, e.g. a `[0]` or
       // `[n]` access), then add each scaled variable component.
       mlir::Value IndexValue = {};
-      if (Access.Index.Constant != 0 or Access.Index.Variables.empty()) {
-        auto IntegerType = Access.Index.Variables.empty() ?
-                             clift::IntegerType::get(Builder.getContext(),
-                                                     IntegerKind::Generic,
-                                                     PointerSize) :
-                             Access.Index.Variables.front().Variable.getType();
-        IndexValue = Builder.create<ImmediateOp>(PointerToReplaceLoc,
-                                                 IntegerType,
-                                                 Access.Index.Constant);
-      }
 
-      for (const auto &Term : Access.Index.Variables) {
-        mlir::Value Contribution = Term.Variable;
-        if (Term.Coefficient != 1) {
-          auto Coefficient = Builder
-                               .create<ImmediateOp>(PointerToReplaceLoc,
-                                                    Term.Variable.getType(),
-                                                    Term.Coefficient);
-          Contribution = Builder.create<MulOp>(PointerToReplaceLoc,
-                                               Contribution,
-                                               Coefficient);
-        }
-        if (IndexValue)
+      auto AddTerm = [&](mlir::Value Term) {
+        if (IndexValue) {
           IndexValue = Builder.create<AddOp>(PointerToReplaceLoc,
                                              IndexValue,
-                                             Contribution);
-        else
-          IndexValue = Contribution;
+                                             Term);
+        } else {
+          IndexValue = Term;
+        }
+      };
+
+      if (not Access.Index.Variables.empty()) {
+        for (const auto &Term : Access.Index.Variables) {
+          mlir::Value Contribution = Term.Variable;
+
+          if (not equivalent(Contribution.getType(), IntPtrType)) {
+            Contribution = Builder.create<BitCastOp>(PointerToReplaceLoc,
+                                                     IntPtrType,
+                                                     Contribution);
+          }
+
+          if (Term.Coefficient != 1) {
+            auto Coefficient = Builder.create<ImmediateOp>(PointerToReplaceLoc,
+                                                           IntPtrType,
+                                                           Term.Coefficient);
+
+            Contribution = Builder.create<MulOp>(PointerToReplaceLoc,
+                                                 Contribution,
+                                                 Coefficient);
+          }
+
+          AddTerm(Contribution);
+        }
       }
 
-      mlir::Type ArrayPointerType = CurrentValue.getType();
-      revng_assert(clift::unwrapped_isa<PointerType>(ArrayPointerType));
-
-      // Finally, we emit a `SubscriptOp` to represent the arithmetic on
-      // `CurrentValue` and the `IndexValue` created above.
-      CurrentValue = Builder.create<SubscriptOp>(PointerToReplaceLoc,
-                                                 CurrentValue,
-                                                 IndexValue);
-
-      CurrentValue = Builder.create<AddressofOp>(PointerToReplaceLoc,
-                                                 ArrayPointerType,
-                                                 CurrentValue);
+      // If a constant offset is present, an immediate operation is emitted
+      // to represent it.
+      if (Access.Index.Constant != 0) {
+        AddTerm(Builder.create<ImmediateOp>(PointerToReplaceLoc,
+                                            IntPtrType,
+                                            Access.Index.Constant));
+      }
 
       break;
     }
@@ -360,9 +364,6 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
       or not LeftoverOffset.LinearCombination.empty()) {
 
     // Cast pointer to integer
-    auto IntPtrType = clift::IntegerType::get(Builder.getContext(),
-                                              IntegerKind::Generic,
-                                              PointerSize);
     CurrentValue = Builder.create<BitCastOp>(PointerToReplaceLoc,
                                              IntPtrType,
                                              CurrentValue);
