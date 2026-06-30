@@ -263,6 +263,12 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
                                               CurrentValue,
                                               IsIndirect,
                                               Index);
+
+      mlir::Type FieldPointerType = PointerType::get(FieldType, PointerSize);
+      CurrentValue = Builder.create<AddressofOp>(PointerToReplaceLoc,
+                                                 FieldPointerType,
+                                                 CurrentValue);
+
       break;
     }
 
@@ -321,30 +327,33 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
           IndexValue = Contribution;
       }
 
-      // Finally, we emit the `SubscriptOp` using as `Index` the `mlir::Value`
-      // constructed above
+      mlir::Type ArrayPointerType = CurrentValue.getType();
+      revng_assert(clift::unwrapped_isa<PointerType>(ArrayPointerType));
+
+      // Finally, we emit a `SubscriptOp` to represent the arithmetic on
+      // `CurrentValue` and the `IndexValue` created above.
       CurrentValue = Builder.create<SubscriptOp>(PointerToReplaceLoc,
                                                  CurrentValue,
                                                  IndexValue);
+
+      CurrentValue = Builder.create<AddressofOp>(PointerToReplaceLoc,
+                                                 ArrayPointerType,
+                                                 CurrentValue);
 
       break;
     }
     }
   }
 
-  // Take address of the result, since we always start the replacement from a
-  // `PointerType`, we want to get back to it
-  auto CurrentValuePointerType = PointerType::get(CurrentValue.getType(),
-                                                  PointerSize);
-  CurrentValue = Builder.create<AddressofOp>(PointerToReplaceLoc,
-                                             CurrentValuePointerType,
-                                             CurrentValue);
-
   // After we emit the `addressof`, we save the resulting `RichType`, which may
   // contain a _rich_ type information of the emitted access. We collect this
   // here before the subsequent `cast` strips it of the type information`. We
   // then propagate the type information into `indirection` uses.
   mlir::Type RichType = CurrentValue.getType();
+
+  // since we always start the replacement from a pointer type, we also want to
+  // end up with one.
+  revng_assert(clift::unwrapped_isa<PointerType>(RichType));
 
   // If there is a non-null `LeftoverOffset`, we add it as integer arithmetic
   if (not LeftoverOffset.BaseOffset.isZero()

@@ -86,7 +86,9 @@ module attributes {clift.module} {
   // CHECK: [[STRUCT:%[0-9]+]] = clift.local : !_2_
   // CHECK: [[ADDRESSOF1:%[0-9]+]] = clift.addressof [[STRUCT]] : !clift.ptr<8 to !_2_>
   // CHECK: [[ACCESS:%[0-9]+]] = clift.access<indirect 0> [[ADDRESSOF1]]
-  // CHECK: [[CAST1:%[0-9]+]] = clift.decay [[ACCESS]]
+  // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[ACCESS]]
+  // CHECK: [[INDIRECTION:%[0-9]+]] = clift.indirection [[ADDRESSOF2]]
+  // CHECK: [[CAST1:%[0-9]+]] = clift.decay [[INDIRECTION]]
   // CHECK: [[IMM:%[0-9]+]] = clift.imm 1
   // CHECK: [[SUBSCRIPT:%[0-9]+]] = clift.subscript [[CAST1]], [[IMM]]
   // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[SUBSCRIPT]]
@@ -119,7 +121,8 @@ module attributes {clift.module} {
   // CHECK: [[CAST1:%[0-9]+]] = clift.decay [[INDIRECTION]]
   // CHECK: [[IMM:%[0-9]+]] = clift.imm 2
   // CHECK: [[SUBSCRIPT:%[0-9]+]] = clift.subscript [[CAST1]], [[IMM]]
-  // CHECK: [[ACCESS:%[0-9]+]] = clift.access< 1> [[SUBSCRIPT]]
-  // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[ACCESS]]
-  // CHECK: clift.yield [[ADDRESSOF2]] : !clift.ptr<8 to !int32_t>
+  // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[SUBSCRIPT]]
+  // CHECK: [[ACCESS:%[0-9]+]] = clift.access<indirect 1> [[ADDRESSOF2]]
+  // CHECK: [[ADDRESSOF3:%[0-9]+]] = clift.addressof [[ACCESS]]
+  // CHECK: clift.yield [[ADDRESSOF3]] : !clift.ptr<8 to !int32_t>
 }

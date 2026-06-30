@@ -37,7 +37,8 @@ module attributes {clift.module} {
   // CHECK: clift.func @test_typedef_pointer_as_array<!f1_>([[POINTER:%[a-z0-9]+]]: {{.*}}, [[INDEX:%[a-z0-9]+]]: {{.*}})
   // CHECK: [[SUBSCRIPT:%[0-9]+]] = clift.subscript [[POINTER]], [[INDEX]]
   // CHECK: [[ADDRESSOF:%[0-9]+]] = clift.addressof [[SUBSCRIPT]]
-  // CHECK: clift.yield [[ADDRESSOF]] : !clift.ptr<8 to !int32_t>
+  // CHECK: [[CAST:%[0-9]+]] = clift.bitcast [[ADDRESSOF]] : !_type_definition_100_TypedefDefinition -> !clift.ptr<8 to !int32_t>
+  // CHECK: clift.yield [[CAST]] : !clift.ptr<8 to !int32_t>
 
 
   // pointer as array access: *(p + 3) should become p[3], with a constant
@@ -56,5 +57,6 @@ module attributes {clift.module} {
   // CHECK: [[IMM:%[0-9]+]] = clift.imm 3
   // CHECK: [[SUBSCRIPT:%[0-9]+]] = clift.subscript [[POINTER]], [[IMM]]
   // CHECK: [[ADDRESSOF:%[0-9]+]] = clift.addressof [[SUBSCRIPT]]
-  // CHECK: clift.yield [[ADDRESSOF]] : !clift.ptr<8 to !int32_t>
+  // CHECK: [[CAST:%[0-9]+]] = clift.bitcast [[ADDRESSOF]] : !_type_definition_100_TypedefDefinition -> !clift.ptr<8 to !int32_t>
+  // CHECK: clift.yield [[CAST]] : !clift.ptr<8 to !int32_t>
 }

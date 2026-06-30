@@ -60,10 +60,12 @@ module attributes {clift.module} {
   // CHECK: [[LOCAL:%[0-9]+]] = clift.local : !_1_
   // CHECK: [[ADDRESSOF1:%[0-9]+]] = clift.addressof [[LOCAL]] : !clift.ptr<8 to !_1_>
   // CHECK: [[ACCESS:%[0-9]+]] = clift.access<indirect 2> [[ADDRESSOF1]]
-  // CHECK: [[CAST:%[0-9]+]] = clift.decay [[ACCESS]]
+  // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[ACCESS]]
+  // CHECK: [[INDIRECTION:%[0-9]+]] = clift.indirection [[ADDRESSOF2]]
+  // CHECK: [[CAST:%[0-9]+]] = clift.decay [[INDIRECTION]]
   // CHECK: [[SUBSCRIPT:%[0-9]+]] = clift.subscript [[CAST]], [[ARG0]]
-  // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[SUBSCRIPT]]
-  // CHECK: clift.yield [[ADDRESSOF2]] : !clift.ptr<8 to !int64_t>
+  // CHECK: [[ADDRESSOF3:%[0-9]+]] = clift.addressof [[SUBSCRIPT]]
+  // CHECK: clift.yield [[ADDRESSOF3]] : !clift.ptr<8 to !int64_t>
 
   // Access pattern: `base + 8 + arg0 << `1 (stride=2 via shift-left by 1)
   // This exercises `composeShl` producing `Stride=2`, then `composeAdd` merging
@@ -89,7 +91,9 @@ module attributes {clift.module} {
   // CHECK: [[LOCAL:%[0-9]+]] = clift.local : !_2_
   // CHECK: [[ADDRESSOF1:%[0-9]+]] = clift.addressof [[LOCAL]] : !clift.ptr<8 to !_2_>
   // CHECK: [[ACCESS:%[0-9]+]] = clift.access<indirect 1> [[ADDRESSOF1]]
-  // CHECK: [[CAST:%[0-9]+]] = clift.decay [[ACCESS]]
+  // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[ACCESS]]
+  // CHECK: [[INDIRECTION:%[0-9]+]] = clift.indirection [[ADDRESSOF2]]
+  // CHECK: [[CAST:%[0-9]+]] = clift.decay [[INDIRECTION]]
   // CHECK: [[SUBSCRIPT:%[0-9]+]] = clift.subscript [[CAST]], [[ARG0]]
   // CHECK: [[ADDRESSOF2:%[0-9]+]] = clift.addressof [[SUBSCRIPT]]
   // CHECK: clift.yield [[ADDRESSOF2]] : !clift.ptr<8 to !int16_t>
