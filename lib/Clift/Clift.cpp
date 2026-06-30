@@ -1559,7 +1559,9 @@ mlir::LogicalResult AccessOp::verify() {
 //===----------------------------- SubscriptOp ----------------------------===//
 
 mlir::LogicalResult SubscriptOp::verify() {
-  auto PointerT = mlir::dyn_cast<PointerType>(getPointer().getType());
+  auto PointerT = clift::unwrapped_dyn_cast<PointerType>(getPointer()
+                                                           .getType());
+
   if (not PointerT)
     return emitOpError() << getOperationName()
                          << " operand must have pointer type.";
