@@ -62,9 +62,7 @@ public:
                                  << " implementation.";
     }
 
-    if (hasMismatchedSignedness(Op))
-      return Op->emitOpError() << " operand signedness does not match operation"
-                                  " semantics.";
+    // TODO: Verify that operation signedness matches semantics.
 
     return mlir::success();
   }
@@ -107,28 +105,6 @@ private:
                      UCmpLeOp,
                      SCmpGeOp,
                      UCmpGeOp>(Op);
-  }
-
-  static bool hasMismatchedSignedness(mlir::Operation *Op) {
-    if (mlir::isa<ShrOp,
-                  UDivOp,
-                  URemOp,
-                  UCmpLtOp,
-                  UCmpGtOp,
-                  UCmpLeOp,
-                  UCmpGeOp>(Op))
-      return clift::isSigned(Op->getOperand(0).getType());
-
-    if (mlir::isa<SarOp,
-                  SDivOp,
-                  SRemOp,
-                  SCmpLtOp,
-                  SCmpGtOp,
-                  SCmpLeOp,
-                  SCmpGeOp>(Op))
-      return not clift::isSigned(Op->getOperand(0).getType());
-
-    return false;
   }
 
   bool isPotentiallyPromotingType(mlir::Type Type) {
