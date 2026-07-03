@@ -769,6 +769,8 @@ def Clift_ImmediateOp : Clift_ExpressionOp<"imm"> {
   let assemblyFormat = [{
     $value attr-dict `:` type($result)
   }];
+
+  let hasVerifier = 1;
 }
 
 def Clift_StringOp : Clift_ExpressionOp<"str"> {

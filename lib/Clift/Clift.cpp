@@ -1279,6 +1279,19 @@ bool YieldOp::isBooleanTestedOperand(mlir::OpOperand &Operand) {
   return Statement.isBooleanTestedExpression(*R);
 }
 
+//===----------------------------- ImmediateOp ----------------------------===//
+
+mlir::LogicalResult ImmediateOp::verify() {
+  uint64_t Width = getObjectSize(getResult().getType()) * 8;
+  uint64_t Mask = static_cast<uint64_t>(-1) >> (64 - Width);
+
+  if (getValue() & ~Mask)
+    return emitOpError() << getOperationName()
+                         << " value out of representable range.";
+
+  return mlir::success();
+}
+
 //===------------------------------ StringOp ------------------------------===//
 
 mlir::LogicalResult StringOp::verify() {
