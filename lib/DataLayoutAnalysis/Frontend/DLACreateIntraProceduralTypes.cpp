@@ -20,6 +20,7 @@
 #include "llvm/Pass.h"
 
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
+#include "revng/LocalVariables/LocalVariableHelpers.h"
 #include "revng/Model/Architecture.h"
 #include "revng/Model/FunctionTags.h"
 #include "revng/Model/IRHelpers.h"
@@ -265,6 +266,10 @@ public:
         // Add entry in SCEVToLayoutType map for values returned by F
         if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
           if (Value *RetVal = RetI->getReturnValue()) {
+            // An array-of-bytes return value is an ABI-lowered aggregate whose
+            // type is already known in the model, so it gets no layout type.
+            if (isArrayOfBytes(RetVal->getType()))
+              continue;
             revng_assert(isa<StructType>(RetVal->getType())
                          or isa<IntegerType>(RetVal->getType())
                          or isa<PointerType>(RetVal->getType()));
@@ -464,6 +469,7 @@ public:
           const auto *Prototype = getCallSitePrototype(Model, C);
           revng_assert(Prototype);
 
+          // FIXME TODO WIP: what are we gonna do for indirect calls
           const Function *Callee = getCallee(C);
           revng_assert(not Callee or not Callee->isVarArg());
 
@@ -488,7 +494,8 @@ public:
           // Add entry in SCEVToLayoutType map for return values of CallInst
           revng_assert(isa<StructType>(C->getType())
                        or isa<IntegerType>(C->getType())
-                       or isa<PointerType>(C->getType()));
+                       or isa<PointerType>(C->getType())
+                       or isArrayOfBytes(C->getType()));
 
           if (isa<StructType>(C->getType())) {
             // Types representing the return type
@@ -517,6 +524,10 @@ public:
                 SCEVToLayoutType.insert(std::make_pair(S, ExtLayout));
               }
             }
+          } else if (isArrayOfBytes(C->getType())) {
+            // An array-of-bytes call result is an ABI-lowered aggregate whose
+            // type is already known in the model; skip it. Its size is still
+            // captured through the alloca it is stored into.
           } else {
             // Type representing the return type
             revng_assert(not C->getType()->isIntegerTy(1));
@@ -575,14 +586,22 @@ public:
           }
 
           if (auto *L = dyn_cast<LoadInst>(&I)) {
-            revng_assert(isa<IntegerType>(L->getType())
-                         or isa<PointerType>(L->getType()));
-
-            revng_assert(not L->getType()->isIntegerTy(1));
+            // An array-of-bytes load yields an ABI-lowered aggregate. We still
+            // create a layout node for it, so the memory-access loop below
+            // finds it as a cache hit and can use it as a pointee. It is not
+            // SCEVable (and could never be a base address), so it is not
+            // registered in SCEVToLayoutType.
+            if (not isArrayOfBytes(L->getType())) {
+              revng_assert(isa<IntegerType>(L->getType())
+                           or isa<PointerType>(L->getType()));
+              revng_assert(not L->getType()->isIntegerTy(1));
+            }
             const auto &[LoadedTy, Created] = Builder.getOrCreateLayoutType(L);
             Changed |= Created;
-            const SCEV *LoadSCEV = SE->getSCEV(L);
-            SCEVToLayoutType.insert(std::make_pair(LoadSCEV, LoadedTy));
+            if (not isArrayOfBytes(L->getType())) {
+              const SCEV *LoadSCEV = SE->getSCEV(L);
+              SCEVToLayoutType.insert(std::make_pair(LoadSCEV, LoadedTy));
+            }
           }
         } else if (auto *A = dyn_cast<AllocaInst>(&I)) {
           revng_assert(not A->isArrayAllocation());
@@ -614,6 +633,18 @@ public:
             // source of the size, so set it here.
             revng_assert(Allocated->Size == 0 or Allocated->Size == AllocSize);
             Allocated->Size = AllocSize;
+          }
+
+          if (hasStackFrameMetadata(A)) {
+            // The stack frame is a struct, not a scalar of the full frame
+            // size. Treat the alloca like the `revng_stack_frame` call used to
+            // be treated before stack frames became allocas: mark the node
+            // non-scalar and give it an artificial pointer, so the DLA recovers
+            // the frame's fields.
+            Allocated->NonScalar = true;
+            auto *Placeholder = TS.createArtificialLayoutType();
+            Placeholder->Size = getPointerSize(Model.Architecture());
+            TS.addPointerLink(Placeholder, Allocated);
           }
         } else if (isa<IntToPtrInst>(&I) or isa<PtrToIntInst>(&I)
                    or isa<BitCastInst>(&I) or isa<ZExtInst>(&I)) {
@@ -790,8 +821,16 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M,
           // Create Base node
           Changed |= ILA.createBaseAddrWithInstanceLink(*this, PointerVal, *B);
 
-          // Create Access node
-          auto AccessSize = Val->getType()->getScalarSizeInBits() / 8;
+          // Create Access node. For an array of bytes (an ABI-lowered
+          // aggregate) getScalarSizeInBits() would be 0, so use the type's
+          // allocation size to record the real number of accessed bytes.
+          uint64_t AccessSize;
+          if (isArrayOfBytes(Val->getType())) {
+            const DataLayout &DL = I.getModule()->getDataLayout();
+            AccessSize = DL.getTypeAllocSize(Val->getType());
+          } else {
+            AccessSize = Val->getType()->getScalarSizeInBits() / 8;
+          }
           auto *AccessNode = TS.createArtificialLayoutType();
           AccessNode->Size = AccessSize;
           AccessNode->InterferingInfo = AllChildrenAreNonInterfering;
@@ -888,7 +927,9 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M,
 
               Pointers.append(Call->arg_begin(), Call->arg_end());
             }
-          } else {
+          } else if (not isArrayOfBytes(RetVal->getType())) {
+            // Array-of-bytes returns are ABI-lowered aggregates; they carry no
+            // layout, so they are not collected as pointers here.
             revng_assert(isa<IntegerType>(RetVal->getType())
                          or isa<PointerType>(RetVal->getType()));
             Pointers.push_back(RetVal);
