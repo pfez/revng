@@ -218,6 +218,10 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M) {
           }
         } else if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
           if (Value *RetVal = RetI->getReturnValue()) {
+            // An array-of-bytes return value is an ABI-lowered aggregate whose
+            // type is already known in the model, so it gets no layout type.
+            if (isArrayOfBytes(RetVal->getType()))
+              continue;
             revng_assert(isa<StructType>(RetVal->getType())
                          or isa<IntegerType>(RetVal->getType())
                          or isa<PointerType>(RetVal->getType()));
