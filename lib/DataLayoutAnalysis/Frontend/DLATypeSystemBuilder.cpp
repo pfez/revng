@@ -140,11 +140,17 @@ DLATypeSystemLLVMBuilder::getLayoutTypes(const Value &V) {
         Results.push_back(getLayoutType(&V, FieldId));
       }
     } else if (isArrayOfBytes(RetTy)) {
-      // A function whose return type is an array of bytes returns an
-      // ABI-lowered aggregate. Its type is already known in the model, so we
-      // do not create any layout type for it and leave Results empty. This
-      // mirrors getOrCreateLayoutTypes, so that a function sharing a prototype
-      // with such a function is not looked up as a scalar (which would abort).
+      // TODO: A function returning an array-of-bytes is a CABI function
+      // returning an aggregate. In order to handle it properly we should
+      // visit it recursively and have first-class support for model types
+      // in DLA, which we currently don't have.
+      // So, for now we just bail out, accepting to degrade the quality of
+      // the results. We don't expect this to affect users much in
+      // practice, because either the input has no debug symbols (and in
+      // that case DLA sees mostly Raw functions, and this case doesn't
+      // trigger) or the model (via debug symbols, or user input) has lots
+      // of good information on CABI function types, in which case the
+      // role of DLA is not that important interprocedurally.
       revng_assert(Results.empty());
     } else {
       revng_assert(isa<IntegerType>(VTy) or isa<PointerType>(VTy));
