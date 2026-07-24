@@ -834,11 +834,11 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
           // Create Base node
           Changed |= ILA.createBaseAddrWithInstanceLink(*this, PointerVal, *B);
 
-          // Create Access node. For an array of bytes (an ABI-lowered
-          // aggregate) getScalarSizeInBits() would be 0, so use the type's
-          // allocation size to record the real number of accessed bytes.
+          // Create Access node.
           uint64_t AccessSize;
           if (isArrayOfBytes(Val->getType())) {
+            // For an array of bytes use the type's allocation size to record
+            // the real number of accessed bytes.
             const DataLayout &DL = I.getModule()->getDataLayout();
             AccessSize = DL.getTypeAllocSize(Val->getType());
           } else {
