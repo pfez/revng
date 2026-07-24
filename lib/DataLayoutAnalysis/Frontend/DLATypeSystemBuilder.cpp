@@ -139,6 +139,13 @@ DLATypeSystemLLVMBuilder::getLayoutTypes(const Value &V) {
         revng_assert(isa<IntegerType>(FieldTy) or isa<PointerType>(FieldTy));
         Results.push_back(getLayoutType(&V, FieldId));
       }
+    } else if (isArrayOfBytes(RetTy)) {
+      // A function whose return type is an array of bytes returns an
+      // ABI-lowered aggregate. Its type is already known in the model, so we
+      // do not create any layout type for it and leave Results empty. This
+      // mirrors getOrCreateLayoutTypes, so that a function sharing a prototype
+      // with such a function is not looked up as a scalar (which would abort).
+      revng_assert(Results.empty());
     } else {
       revng_assert(isa<IntegerType>(VTy) or isa<PointerType>(VTy));
       Results.push_back(getLayoutType(&V));
