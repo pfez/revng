@@ -587,11 +587,22 @@ public:
           }
 
           if (auto *L = dyn_cast<LoadInst>(&I)) {
-            // An array-of-bytes load yields an ABI-lowered aggregate. We still
-            // create a layout node for it, so the memory-access loop below
-            // finds it as a cache hit and can use it as a pointee. It is not
-            // SCEVable (and could never be a base address), so it is not
+            // An array-of-bytes load is typically used in a ret, to return a
+            // value from within a CABI function returning an aggregate. We
+            // still create a layout node for it, so the memory-access loop
+            // below finds it as a cache hit and can use it as a pointee. It is
+            // not SCEVable (and could never be a base address), so it is not
             // registered in SCEVToLayoutType.
+            // TODO: In order to handle it properly we should visit it
+            // recursively and have first-class support for model types in DLA,
+            // which we currently don't have.
+            // So, for now we just bail out, accepting to degrade the quality of
+            // the results. We don't expect this to affect users much in
+            // practice, because either the input has no debug symbols (and in
+            // that case DLA sees mostly Raw functions, and this case doesn't
+            // trigger) or the model (via debug symbols, or user input) has lots
+            // of good information on CABI function types, in which case the
+            // role of DLA is not that important interprocedurally.
             if (not isArrayOfBytes(L->getType())) {
               revng_assert(isa<IntegerType>(L->getType())
                            or isa<PointerType>(L->getType()));
