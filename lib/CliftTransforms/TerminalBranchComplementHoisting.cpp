@@ -2,6 +2,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "llvm/ADT/SmallVector.h"
+
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -19,17 +21,18 @@ using namespace clift;
 
 namespace {
 
-enum class HoistingTarget : bool {
-  Then,
-  Else,
-};
-
-static bool hasSingleNoFallthrough(mlir::Region &R) {
-  return static_cast<bool>(getLastNoFallthroughStatement(R));
+// A branch region falls through when control can reach the end of the branch
+// operation through it. A block-less region - a missing else or default, or an
+// empty `{}` case body - also falls through.
+static bool fallsThrough(mlir::Region &R) {
+  return not isIndirectlyNoFallthrough(R);
 }
 
 // Computes an approximation of the size of a statement region in C.
 static unsigned approximateRegionWeight(mlir::Region &R) {
+  if (R.empty())
+    return 0;
+
   revng_assert(R.hasOneBlock());
 
   unsigned Weight = 0;
@@ -48,71 +51,166 @@ static unsigned approximateRegionWeight(mlir::Region &R) {
   return Weight;
 }
 
-// Attempts to select one branch of an if-statement to be inlined into the
-// nesting scope. If neither branch should be hoisted, the result is nullopt.
-static std::optional<HoistingTarget> selectHoistingTarget(IfOp If) {
-  if (If.getElse().empty())
+// A non-fallthrough region has a definite kind when control leaves it in a
+// single known way (continue, break, goto or return), as opposed to a Mixed
+// region whose nested branches leave in differing ways.
+static bool hasDefiniteKind(mlir::Region &R) {
+  return isIndirectlyNoFallthrough(R) != NoFallthroughKind::Mixed;
+}
+
+// When no branch region falls through, any of them may be hoisted. Generalising
+// the original if-statement heuristic to any number of regions: prefer a region
+// that leaves in a single definite way over a Mixed one, then the one with the
+// lowest weight (ties resolved towards the later region).
+static unsigned selectByHeuristic(llvm::MutableArrayRef<mlir::Region> Regions) {
+  unsigned Best = 0;
+  bool BestDefinite = hasDefiniteKind(Regions[0]);
+  // The weight is only needed to break ties, so it is computed lazily and
+  // cached, rather than re-walking the winning region on every iteration.
+  std::optional<unsigned> BestWeight;
+
+  for (unsigned I = 1; I < Regions.size(); ++I) {
+    bool CandidateDefinite = hasDefiniteKind(Regions[I]);
+
+    // Prefer a region that leaves in a single definite way.
+    if (CandidateDefinite != BestDefinite) {
+      if (CandidateDefinite) {
+        Best = I;
+        BestDefinite = true;
+        BestWeight.reset();
+      }
+      continue;
+    }
+
+    // Otherwise prefer the lowest weight (or the later region if equal).
+    if (not BestWeight)
+      BestWeight = approximateRegionWeight(Regions[Best]);
+    unsigned CandidateWeight = approximateRegionWeight(Regions[I]);
+    if (CandidateWeight <= *BestWeight) {
+      Best = I;
+      BestWeight = CandidateWeight;
+    }
+  }
+
+  return Best;
+}
+
+// Hoisting the branch region \p Target of \p Branch makes progress (is not a
+// no-op) when it has statements to move out, or when the hoist inverts the
+// condition of an if statement.
+static bool
+hoistMakesProgress(BranchOpInterface Branch, unsigned Target, mlir::Region &R) {
+  if (mlir::Block *Block = getOnlyBlock(R); Block and not Block->empty())
+    return true;
+
+  // An if statement hoisting its then branch inverts the condition, which is
+  // progress even when that branch is empty.
+  return mlir::isa<IfOp>(Branch.getOperation()) and Target == 0;
+}
+
+// Selects the branch region of \p Branch to be inlined into the nesting scope,
+// as an index into getBranchRegions(). If none should be hoisted, the result is
+// nullopt.
+static std::optional<unsigned> selectHoistingTarget(BranchOpInterface Branch) {
+  // Preserve the exact if-statement handling of empty branches.
+  if (auto If = mlir::dyn_cast<IfOp>(Branch.getOperation())) {
+    // No else branch: nothing complementary to hoist.
+    if (If.getElse().empty())
+      return std::nullopt;
+
+    // Empty then branch (`then {}`): inverting the if drops it.
+    if (If.getThen().empty())
+      return 0;
+
+    // Empty else block (`else { ^bb: }`): drop it.
+    if (If.getElse().front().empty())
+      return 1;
+  }
+
+  llvm::MutableArrayRef<mlir::Region> Regions = Branch.getBranchRegions();
+
+  // Collect the branch regions that fall through.
+  llvm::SmallVector<unsigned> Fallthrough;
+  for (unsigned I = 0; I < Regions.size(); ++I) {
+    if (fallsThrough(Regions[I]))
+      Fallthrough.push_back(I);
+  }
+
+  // With two or more fall-through branches, hoisting one would still leave
+  // another that reaches the hoisted code: the rewrite would be invalid.
+  if (Fallthrough.size() >= 2)
     return std::nullopt;
 
-  if (If.getThen().empty())
-    return HoistingTarget::Then;
-
-  if (If.getElse().front().empty())
-    return HoistingTarget::Else;
-
-  bool ThenFallthrough = not isIndirectlyNoFallthrough(If.getThen());
-  bool ElseFallthrough = not isIndirectlyNoFallthrough(If.getElse());
-
-  // If both branches fall through, neither can be hoisted.
-  if (ThenFallthrough and ElseFallthrough)
+  // With a single fall-through branch, all others are non-fallthrough, so it
+  // can be hoisted (as long as that makes progress).
+  if (Fallthrough.size() == 1) {
+    unsigned Target = Fallthrough.front();
+    if (hoistMakesProgress(Branch, Target, Regions[Target]))
+      return Target;
     return std::nullopt;
+  }
 
-  // If exactly one branch falls through, that one is hoisted.
-  if (ThenFallthrough != ElseFallthrough)
-    return static_cast<HoistingTarget>(ElseFallthrough);
+  // No branch falls through: the whole operation is non-fallthrough, so any
+  // branch may be hoisted. Pick one with the heuristic.
+  return selectByHeuristic(Regions);
+}
 
-  bool ThenHasDirectNoFallthrough = hasSingleNoFallthrough(If.getThen());
-  bool ElseHasDirectNoFallthrough = hasSingleNoFallthrough(If.getElse());
+// After its body is hoisted out, the emptied branch region can be removed
+// entirely for an if (its else) or a switch default. A switch case is instead
+// kept as an empty body, so its value still falls through to the hoisted code.
+//
+// Dropping a case is never valid, which is subtle: a case is hoisted only when
+// the switch has a non-fallthrough default - either the case is the sole
+// fallthrough branch, so the default does not fall through, or
+// selectByHeuristic ran, which requires no branch (the default included) to
+// fall through, so the default is non-empty. Removing the case would then route
+// its value to that default instead of to the hoisted code. A switch with no
+// default hoists nothing anyway: its implicit fallthrough for unmatched values
+// is itself a fallthrough branch, so no lone fallthrough case is ever left to
+// hoist.
+static bool isDroppableBranch(BranchOpInterface Branch, unsigned Target) {
+  if (mlir::isa<IfOp>(Branch.getOperation()))
+    return true;
 
-  // If exactly one branch contains a single directly non-fallthrough operation,
-  // that one is hoisted.
-  if (ThenHasDirectNoFallthrough != ElseHasDirectNoFallthrough)
-    return static_cast<HoistingTarget>(ElseHasDirectNoFallthrough);
-
-  // Otherwise, the sizes of both branches are approximated, and a decision is
-  // made by comparing those approximations.
-  unsigned ThenWeight = approximateRegionWeight(If.getThen());
-  unsigned ElseWeight = approximateRegionWeight(If.getElse());
-
-  // Hoist the region with the lower weight (or else if equal).
-  return static_cast<HoistingTarget>(ElseWeight <= ThenWeight);
+  // getBranchRegions() of a switch is [default, cases...]; only the default may
+  // be dropped.
+  return Target == 0;
 }
 
 struct TerminalBranchComplementHoistingPattern
-  : mlir::OpRewritePattern<clift::IfOp> {
+  : mlir::OpInterfaceRewritePattern<BranchOpInterface> {
 
-  using OpRewritePattern::OpRewritePattern;
+  using OpInterfaceRewritePattern::OpInterfaceRewritePattern;
 
   mlir::LogicalResult
-  matchAndRewrite(clift::IfOp If,
+  matchAndRewrite(BranchOpInterface Branch,
                   mlir::PatternRewriter &Rewriter) const override {
-    auto OptTarget = selectHoistingTarget(If);
+    auto OptTarget = selectHoistingTarget(Branch);
     if (not OptTarget)
       return mlir::failure();
-    auto Target = *OptTarget;
+    unsigned Target = *OptTarget;
 
-    if (Target == HoistingTarget::Then)
+    // An if statement hoisting its then branch is inverted first, so the
+    // hoisted branch becomes the else and the readable `if (!c) { ... }` form
+    // is kept.
+    if (auto If = mlir::dyn_cast<IfOp>(Branch.getOperation());
+        If and Target == 0) {
       invertIfStatement(Rewriter, If);
+      Target = 1;
+    }
 
-    if (mlir::Block *ElseBlock = getOnlyBlock(If.getElse())) {
-      Rewriter.updateRootInPlace(If.getOperation(), [&]() {
+    mlir::Region &R = Branch.getBranchRegions()[Target];
+    if (mlir::Block *Block = getOnlyBlock(R)) {
+      mlir::Operation *Op = Branch.getOperation();
+      Rewriter.updateRootInPlace(Op, [&]() {
         inlineBlockBefore(Rewriter,
-                          ElseBlock,
-                          If->getBlock(),
-                          std::next(If->getIterator()));
+                          Block,
+                          Op->getBlock(),
+                          std::next(Op->getIterator()));
       });
 
-      Rewriter.eraseBlock(ElseBlock);
+      if (isDroppableBranch(Branch, Target))
+        Rewriter.eraseBlock(Block);
     }
 
     return mlir::success();
