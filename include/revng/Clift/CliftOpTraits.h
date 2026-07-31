@@ -25,6 +25,23 @@ public:
   }
 };
 
+/// Classifies how control leaves a statement region, refining the NoFallthrough
+/// trait. FallsThrough is zero, so a kind can be tested directly as a boolean:
+/// any non-zero kind means control cannot fall through past the end of the
+/// region.
+///
+/// The named non-fallthrough kinds correspond to the terminating statement the
+/// region ends in. Mixed is used for a branch whose sub-regions are each
+/// non-fallthrough but disagree on how (e.g. one returns while another breaks).
+enum NoFallthroughKind {
+  FallsThrough = 0,
+  Continue,
+  Break,
+  Goto,
+  Return,
+  Mixed,
+};
+
 template<typename ConcreteType>
 class AssignsLoopLabels
   : public mlir::OpTrait::TraitBase<ConcreteType, AssignsLoopLabels> {

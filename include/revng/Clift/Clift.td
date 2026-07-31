@@ -352,7 +352,7 @@ def Clift_BlockStatementOp
   }];
 
   let extraClassDeclaration = [{
-    bool isIndirectlyNoFallthrough();
+    clift::NoFallthroughKind isIndirectlyNoFallthrough();
 
     unsigned getStatementRegionCount() {
       return 1;
@@ -524,7 +524,7 @@ def Clift_IfOp : Clift_BasicStatementOp<"if", Clift_BranchOpInterface> {
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{
-    bool isIndirectlyNoFallthrough() const;
+    clift::NoFallthroughKind isIndirectlyNoFallthrough() const;
 
     [[nodiscard]] bool isBooleanTestedExpression(mlir::Region &R) {
       return &R == &getCondition();
@@ -633,7 +633,7 @@ def Clift_SwitchOp : Clift_BasicStatementOp<"switch", Clift_BranchOpInterface> {
   ];
 
   code extraClassDeclaration = [{
-    bool isIndirectlyNoFallthrough() const;
+    clift::NoFallthroughKind isIndirectlyNoFallthrough() const;
 
     [[nodiscard]] mlir::Type getConditionType();
 
