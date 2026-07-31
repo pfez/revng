@@ -244,6 +244,37 @@ struct TerminalBranchComplementHoistingPattern
   }
 };
 
+// A branch operation whose branch regions are all empty (no statements at all)
+// does nothing but evaluate its condition, so it reduces to an expression
+// statement that yields the condition. This covers an if with two empty
+// branches and a switch whose cases and default are all empty, and it also
+// cleans up the empty ifs that complement hoisting can leave behind.
+struct DegenerateBranchPattern
+  : mlir::OpInterfaceRewritePattern<BranchOpInterface> {
+
+  using OpInterfaceRewritePattern::OpInterfaceRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(BranchOpInterface Branch,
+                  mlir::PatternRewriter &Rewriter) const override {
+    for (mlir::Region &R : Branch.getBranchRegions()) {
+      if (not R.empty() and not R.front().empty())
+        return mlir::failure();
+    }
+
+    // getBranchRegions() drops the leading condition region, which is moved
+    // into the expression statement that replaces the branch.
+    mlir::Operation *Op = Branch.getOperation();
+    Rewriter.setInsertionPoint(Op);
+    auto Expr = Rewriter.create<ExpressionStatementOp>(Op->getLoc());
+    Rewriter.inlineRegionBefore(Op->getRegion(0),
+                                Expr.getExpression(),
+                                Expr.getExpression().end());
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 template<typename T>
 using PassBase = clift::impl::CliftTerminalBranchComplementHoistingBase<T>;
 
@@ -258,6 +289,7 @@ struct TerminalBranchComplementHoistingPass
     {
       mlir::RewritePatternSet Patterns(Context);
       Patterns.add<TerminalBranchComplementHoistingPattern>(Context);
+      Patterns.add<DegenerateBranchPattern>(Context);
 
       // TODO: Use walkAndApplyPatterns
       if (mlir::applyPatternsAndFoldGreedily(Function, std::move(Patterns))

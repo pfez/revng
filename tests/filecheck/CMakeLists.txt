@@ -383,6 +383,8 @@ set(FILECHECK_TESTS
     clift/statement-rewrites/terminal-branch-complement-hoisting-both-fallthrough.mlir
     clift/statement-rewrites/terminal-branch-complement-hoisting-both-goto-else-shorter.mlir
     clift/statement-rewrites/terminal-branch-complement-hoisting-both-goto.mlir
+    clift/statement-rewrites/terminal-branch-complement-hoisting-degenerate-if.mlir
+    clift/statement-rewrites/terminal-branch-complement-hoisting-degenerate-switch.mlir
     clift/statement-rewrites/terminal-branch-complement-hoisting-else-goto.mlir
     clift/statement-rewrites/terminal-branch-complement-hoisting-empty-else.mlir
     clift/statement-rewrites/terminal-branch-complement-hoisting-empty-then.mlir
