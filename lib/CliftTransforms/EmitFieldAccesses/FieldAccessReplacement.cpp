@@ -251,6 +251,9 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
                                             IntegerKind::Generic,
                                             PointerSize);
 
+  bool HasLeftovers = not LeftoverOffset.BaseOffset.isZero()
+                      or not LeftoverOffset.LinearCombination.empty();
+
   // Apply each field access in sequence
   // Iterate over every `FieldAccess` in `Replacement`, and materialize the
   // `clift` `Operation`s needed to perform such access
@@ -336,7 +339,8 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
 
       // If a constant offset is present, an immediate operation is emitted
       // to represent it.
-      if (Access.Index.Constant != 0) {
+      if (Access.Index.Constant != 0
+          or (HasLeftovers and Access.Index.Variables.empty())) {
         AddTerm(Builder.create<ImmediateOp>(PointerToReplaceLoc,
                                             IntPtrType,
                                             Access.Index.Constant));
@@ -358,8 +362,7 @@ bool Replacement::replace(ExpressionOpInterface PointerToReplace,
   revng_assert(clift::unwrapped_isa<PointerType>(RichType));
 
   // If there is a non-null `LeftoverOffset`, we add it as integer arithmetic
-  if (not LeftoverOffset.BaseOffset.isZero()
-      or not LeftoverOffset.LinearCombination.empty()) {
+  if (HasLeftovers) {
 
     // Cast pointer to integer
     CurrentValue = Builder.create<BitCastOp>(PointerToReplaceLoc,
