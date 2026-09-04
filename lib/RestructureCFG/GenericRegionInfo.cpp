@@ -6,6 +6,7 @@
 #include "llvm/ADT/GenericCycleImpl.h"
 #include "llvm/ADT/GenericCycleInfo.h"
 #include "llvm/ADT/GraphTraits.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
@@ -20,7 +21,7 @@
 using namespace llvm;
 
 // Debug logger
-Logger GenericRegionInfoLogger("generic-region-info");
+Logger Log("generic-region-info");
 
 /// Helper function which mimics the `at` behavior for a `llvm::SmallDenseMap`
 template<class KeyT, class ValueT>
@@ -155,21 +156,28 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
     ShortestPathFromEntry = std::nullopt;
 
   // 3) Perform the head election for each `Region`, in a bottom up fashion
+  size_t RegionIndex = 0;
   for (auto &TopLevelRegion : top_level_regions()) {
+    LoggerIndent IndentRegion{ Log };
     for (auto &CurrentRegion : post_order(&TopLevelRegion)) {
+      revng_log(Log,
+                "DAGify processing region with index: "
+                  << std::to_string(RegionIndex++) << "\n");
+      LoggerIndent MoreIndentRegion{ Log };
 
       // The `Head` election phase works in a bottom-up fashion and it must
       // guarantee that the decision we take when processing a region, is
       // coherent with all the children region it contains. Specifically, we
-      // have these 2 criteria:
-      // 1) We must be coherent in terms of _late entries_. This means that if a
+      // must guarantee the following properties.
+      // * We must be coherent in terms of _late entries_. This means that if a
       // node is considered a late entry for a child region, it must be a late
-      // entry too for its parent region. If this is not true we may end up
-      // disconnecting portion of the graph from the entry. In practical terms,
-      // this means that when electing the `Head` of a region, we must exclude
-      // from the candidates all the nodes that happens to be late entry for its
-      // children regions.
-      // 2) If a child region elected a `Head` which is a candidate for the
+      // entry for its parent region as well. So it may not be elected as a head
+      // for the parent. If a late entry for a child is elected as head for the
+      // parent we may end up disconnecting portion of the graph from the entry.
+      // In practice, this means that when electing the `Head` of a region, we
+      // must exclude from the candidates all the nodes that happens to be late
+      // entries for its children regions.
+      // * If a child region elected a `Head` is also a candidate head for the
       // current region, we must take the same decision for parent region too.
       // If this is not done, we may end up disconnecting nodes from the entry,
       // because we do not have a single entry point into the tree of nested
@@ -177,55 +185,59 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
       // as `Head`. If A is also contained in the inner child region, and we
       // elect another block, say B, as its `Head`, it would mean that A becomes
       // a late entry for the inner region, causing it to be disconnected (late
-      // entry edges are transformed into `goto` edges). If these criteria dp
-      // not apply, we continue with the standard criterion election.
+      // entry edges are transformed into `goto` edges).
+      //
+      // Once we have guaranteed these properties, we can pick whatever
+      // candidate head is left with a logic of our choice.
 
       // All the blocks which have an incoming edge from a block not part of the
       // region itself, are considered as head candidates
+      revng_log(Log, "Head candidates:");
       llvm::SmallMapVector<NodeT, size_t, 4> HeadCandidates;
       for (NodeT Block : getHeadCandidates(*CurrentRegion)) {
+        LoggerIndent CandidateIndent{ Log };
+        revng_log(Log, Block->getName());
         HeadCandidates[Block]++;
       }
 
-      // Criterion 1. Please note that we iterate just on the direct
-      // `children` of each region, and not explicitly on all the
-      // `grandchildren` too, but this is justified by the following reasoning:
-      // Imagine we have the nested regions A B C (nesting is outer->inner), if
-      // some node X is a late entry for C, either it is a late entry for B too
-      // (and this in turns means that for being a late entry, it must have been
-      // a candidate `Head` at some point, but not chosen as the elected
-      // `Head`), or it is a late entry for C but not for B.
-      // In the first scenario, since X is a late entry for B too, when we
-      // analyze A, we will find it as a late entry for B, which is a direct
-      // child of A, and so we are good. If, however, X is a late entry for C
-      // but not for B, it means that we do not have an edge crossing multiple
-      // layers from A to C (otherwise X would be a late entry for B too). In
-      // that case X is contained in C, B, A by construction, but it is not a
-      // late entry for B, therefore not a candidate `Head` for A. Therefore we
-      // do not care to look at it when analyzing the candidate heads for A.
+      // Filter away children's late entries. If there are any children, their
+      // head has already been elected. None of the nodes in a children
+      // different from the children's already selected head can be selected as
+      // a head of the parent, because that would cause a regular entry in the
+      // parent to also be a late entry in the children, which is impossible.
+      // Notice that we iterate only on direct children regions and not on
+      // grandchildren but given that we work from the innermost to the
+      // outermost regions the property is guaranteed by induction.
+      revng_log(Log,
+                "Purging childrens' late entries from parent's candidates");
       for (auto ChildRegion : CurrentRegion->children()) {
+        LoggerIndent ChildrenIndent{ Log };
         NodeT ChildHead = ChildRegion->getHead();
         revng_assert(ChildHead);
 
         for (NodeT Block : getHeadCandidates(*ChildRegion)) {
           if (Block != ChildHead) {
             HeadCandidates.erase(Block);
+            revng_log(Log,
+                      "child's late entry block can't be head of parent: "
+                        << Block->getName());
           }
+        }
+        revng_log(Log, "Remaining Head candidates:");
+        for (const auto &[Block, _] : HeadCandidates) {
+          LoggerIndent CandidateIndent{ Log };
+          revng_log(Log, Block->getName());
         }
       }
 
-      // Criterion 2. Please note that we just iterate over the direct
-      // `children` of each region, and not explicitly on all the
-      // `grandchildren` too, but this is justified by the following reasoning:
-      // Suppose we have regions A B (nesting is outer->inner).
-      // If we're looking at A, and one of A's candidates heads (X) is also in a
-      // direct children region (B), do we need to look at B's children for
-      // criterion 2?
-      // The answer is no because if there is one of B's children that "forces"
-      // B's head to X, it's enough to look at B. And if there isn't a children
-      // of B that forces B's head to X, we don't care about it at all, because
-      // we just need A to be coherent with B in this sense.
+      // If one of the HeadCandidates is already an elected head of a child
+      // region, pick it as a head for the parent region as well.
+      // Notice that again we iterate only on direct children regions and not on
+      // grandchildren but given that we work from the innermost to the
+      // outermost regions the property is guaranteed by induction.
+      revng_log(Log, "Pick head that is already a head of a child");
       for (auto ChildRegion : CurrentRegion->children()) {
+        LoggerIndent ChildrenIndent{ Log };
         NodeT ChildHead = ChildRegion->getHead();
         revng_assert(ChildHead);
 
@@ -234,15 +246,42 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
         for (auto &[HeadCandidate, _] : HeadCandidates) {
           if (HeadCandidate == ChildHead) {
             CurrentRegion->setHead(HeadCandidate);
+            revng_log(Log, "setHead: " << HeadCandidate->getName());
             break;
           }
         }
       }
 
-      // If we elected an `Head` with the "shortcut" criterion mentioned above,
-      // we skip the standard election phase
+      // If we elected a `Head` of a child, we can move on to the next region.
       if (CurrentRegion->getHead()) {
         continue;
+      }
+
+      // If one of the remaining head candidates only reaches nodes in children
+      // regions, an none of those are elected heads for the children, then that
+      // candidate can't be elected as head, because after dagifying the
+      // children it wouldn't reach anything.
+      revng_log(Log,
+                "Purging head candidates that only reach late entries of inner "
+                "regions");
+      for (const auto &[Candidate, _] :
+           llvm::make_early_inc_range(HeadCandidates)) {
+        LoggerIndent CandidateIndent{ Log };
+        const auto IsInChildrenButNotHead = [&CurrentRegion](NodeT B) {
+          const auto ContainsBlockAndNotHead = [B](Region *R) {
+            return R->containsBlock(B) and B != R->getHead();
+          };
+          return llvm::any_of(CurrentRegion->children(),
+                              ContainsBlockAndNotHead);
+        };
+        if (llvm::all_of(llvm::children<GraphT>(Candidate),
+                         IsInChildrenButNotHead)) {
+          revng_log(Log,
+                    "Purge Candidate that only reaches late entries of "
+                    "children: "
+                      << Candidate->getName());
+          HeadCandidates.erase(Candidate);
+        }
       }
 
       // Elect the `Head` as the candidate head with the largest number of
@@ -253,15 +292,22 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
       // tie, i.e., there are 2 or more candidate heads with, also, the same
       // minimal shortest path from entry, then we disambiguate by picking the
       // head that comes first in RPOT.
+      revng_log(Log, "Pick the best head");
+      revng_assert(not HeadCandidates.empty());
       NodeT Head = HeadCandidates.begin()->first;
+      revng_log(Log, "Head: " << Head->getName());
       {
         size_t MaxNHead = HeadCandidates.begin()->second;
+        revng_log(Log, "Max Incomings: " << MaxNHead);
         auto HeadEnd = HeadCandidates.end();
+
         for (NodeT Block : RPOT) {
           auto HeadIt = HeadCandidates.find(Block);
           if (HeadIt != HeadEnd) {
             const auto &[HeadCandidate, NumIncoming] = *HeadIt;
             if (NumIncoming > MaxNHead) {
+              revng_log(Log, "New Max Incomings: " << NumIncoming);
+              revng_log(Log, "New Head: " << HeadCandidate->getName());
               MaxNHead = NumIncoming;
               Head = HeadCandidate;
             } else if (NumIncoming == MaxNHead) {
@@ -275,6 +321,9 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
               size_t CandidateShortest = mapAt(*ShortestPathFromEntry,
                                                HeadCandidate);
               if (CandidateShortest < CurrentShortest) {
+                revng_log(Log,
+                          "New Head coming first in RPOT: "
+                            << HeadCandidate->getName());
                 Head = HeadCandidate;
               }
             }
@@ -300,7 +349,7 @@ void GenericRegionInfo<GraphT, GT>::compute(GraphT F) {
   // Print the `GenericRegionInfo` results, when the respective Logger is
   // activated. This is used both for debugging purposes and for testing with
   // `FileCheck`.
-  revng_log(GenericRegionInfoLogger, print());
+  revng_log(Log, print());
 }
 
 template<class GraphT, class GT>
