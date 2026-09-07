@@ -370,6 +370,8 @@ set(FILECHECK_TESTS
     clift/serialization/const.mlir
     clift/statement-rewrites/branch-equalization.mlir
     clift/statement-rewrites/do-while-conversion-iterative.mlir
+    clift/statement-rewrites/degenerate-branch-if.mlir
+    clift/statement-rewrites/degenerate-branch-switch.mlir
     clift/statement-rewrites/do-while-conversion-with-empty-else.mlir
     clift/statement-rewrites/do-while-conversion-with-hoisted-else.mlir
     clift/statement-rewrites/do-while-conversion-with-hoisted-then.mlir

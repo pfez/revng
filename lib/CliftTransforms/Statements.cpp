@@ -448,6 +448,39 @@ struct DoWhileConversionPattern : mlir::OpRewritePattern<WhileOp> {
   }
 };
 
+/// A branch operation whose branch regions are all empty (no statements at all)
+/// does nothing but evaluate its condition, so it reduces to an expression
+/// statement that yields the condition. This covers an if with two empty
+/// branches and a switch whose cases and default are all empty, and it also
+/// cleans up the empty ifs that complement hoisting can leave behind.
+struct DegenerateBranchPattern
+  : mlir::OpInterfaceRewritePattern<BranchOpInterface> {
+
+  using OpInterfaceRewritePattern::OpInterfaceRewritePattern;
+
+  void initialize() { setDebugName("degenerate-branch"); }
+
+  mlir::LogicalResult
+  matchAndRewrite(BranchOpInterface Branch,
+                  mlir::PatternRewriter &Rewriter) const override {
+    for (mlir::Region &R : Branch.getBranchRegions()) {
+      if (not R.empty() and not R.front().empty())
+        return mlir::failure();
+    }
+
+    // getBranchRegions() drops the leading condition region, which is moved
+    // into the expression statement that replaces the branch.
+    mlir::Operation *Op = Branch.getOperation();
+    Rewriter.setInsertionPoint(Op);
+    auto Expr = Rewriter.create<ExpressionStatementOp>(Op->getLoc());
+    Rewriter.inlineRegionBefore(Op->getRegion(0),
+                                Expr.getExpression(),
+                                Expr.getExpression().end());
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Insert a block statement directly nested in the region and move the existing
 /// statements into the newly created block statement region.
 static void wrapInBlockStatement(mlir::Region &R) {
@@ -489,6 +522,7 @@ struct OptimizeStatementsPass
     Set.add<EmptyIfInversionPattern>(Context);
     Set.add<TrivialJumpEliminationPattern>(Context);
     Set.add<DoWhileConversionPattern>(Context);
+    Set.add<DegenerateBranchPattern>(Context);
 
     Patterns = mlir::FrozenRewritePatternSet(std::move(Set),
                                              disabledPatterns,
