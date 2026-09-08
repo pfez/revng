@@ -415,7 +415,7 @@ entry:
   br label %dispatch
 
 dispatch:
-  br i1 undef, label %second_dispatch, label %outer_body
+  br i1 undef, label %second_dispatch, label %shared_head
 
 second_dispatch:
   br i1 undef, label %self_loop_head, label %shared_head
