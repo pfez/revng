@@ -441,21 +441,31 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
       // outermost regions the property is guaranteed by induction.
       revng_log(Log,
                 "Purging childrens' late entries from parent's candidates");
-      for (auto &[Node, Info] :
-           llvm::make_early_inc_range(HeadCandidatesInfo)) {
-        LoggerIndent HeadIndent{ Log };
-        if (Info.IsInChild and not Info.IsChildHead) {
+      {
+        LoggerIndent PurgeIndent{ Log };
+
+        SmallVector<NodeT> CandidatesToPurge;
+        for (auto &[Node, Info] : HeadCandidatesInfo) {
+          if (Info.IsInChild and not Info.IsChildHead) {
+            CandidatesToPurge.push_back(Node);
+          }
+        }
+        for (NodeT ToPurge : CandidatesToPurge) {
+          LoggerIndent ToPurgeIndent{ Log };
           revng_log(Log,
                     "child's late entry block can't be head of parent: "
-                      << Node->getName());
-          HeadCandidatesInfo.erase(Node);
+                      << ToPurge->getName());
+          HeadCandidatesInfo.erase(ToPurge);
+        }
+        if (not CandidatesToPurge.empty()) {
+          revng_log(Log, "Remaining Head candidates:");
+          for (const auto &[Block, _] : HeadCandidatesInfo) {
+            LoggerIndent CandidateIndent{ Log };
+            revng_log(Log, Block->getName());
+          }
         }
       }
-      revng_log(Log, "Remaining Head candidates:");
-      for (const auto &[Block, _] : HeadCandidatesInfo) {
-        LoggerIndent CandidateIndent{ Log };
-        revng_log(Log, Block->getName());
-      }
+
       revng_log(Log, "Pick the best head");
       NodeT CurrentHead = nullptr;
       HeadScoreInfo Best = worst();
@@ -475,7 +485,8 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
           continue;
 
         if (Cmp < 0) {
-          revng_assert(isValidHead(*CurrentRegion, Candidate));
+          if (VerifyLog.isEnabled())
+            revng_assert(isValidHead(*CurrentRegion, Candidate));
 
           revng_log(Log, "New Head: " << Candidate->getName());
           revng_log(Log, "New Best:");
@@ -495,7 +506,8 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
           size_t CandidateShortest = mapAt(*ShortestPathFromEntry, Candidate);
           if (CandidateShortest < CurrentShortest) {
 
-            revng_assert(isValidHead(*CurrentRegion, Candidate));
+            if (VerifyLog.isEnabled())
+              revng_assert(isValidHead(*CurrentRegion, Candidate));
 
             revng_log(Log,
                       "New Head with shortest path from entry: "
