@@ -157,23 +157,21 @@ getHeadCandidatesInfo(GenericRegion<NodeT> &Region) {
   GenericRegion<NodeT> *Parent = Region.getParent();
   for (NodeT Block : Region.blocks()) {
     for (NodeT Predecessor : graph_predecessors(Block)) {
-      // If the Region doesn not contain the Predecessor, and the Predecessor is
+      // If the Region does not contain the Predecessor, and the Predecessor is
       // strictly in the Parent region, the Block is a Candidate.
-      // Predecessors not in the parent region don't count as candidates.
-      // The reason why they don't is that if we pick a head that is not
-      // directly in the parent region, all edges from parent region to this
-      // region will become late entris, hence gotos.
+      // Predecessors not strictly in the parent region but just in an ancestor
+      // don't count to make the Block a candidate.
+      // The reason why they don't is that if we pick a head that has no
+      // predecessors in in the parent region, all edges from parent region to
+      // this region will become late entris, hence gotos.
       // So, if the head of the parent region is then elected to be a node that
       // is *not* in the current child region, it will not be possible to reach
       // the child from the elected head of the parent, except via gotos. Hence,
       // that would disconnect the child from the parent, which is something we
       // want to avoid by design.
       if (not Region.containsBlock(Predecessor)) {
-        auto &Info = HeadCandidatesInfo[Block];
         if (not Parent or Parent->containsBlock(Predecessor)) {
-          Info.NumEdgesFromDirectParent++;
-        } else {
-          Info.NumEdgesFromAncestors++;
+          HeadCandidatesInfo[Block].NumEdgesFromDirectParent++;
         }
       }
     }
@@ -190,6 +188,12 @@ getHeadCandidatesInfo(GenericRegion<NodeT> &Region) {
     }
     for (NodeT Predecessor : graph_predecessors(Node)) {
       bool PredecessorInChild = false;
+
+      if (GenericRegion<NodeT> *Parent = Region.getParent();
+          Parent and not Parent->containsBlock(Predecessor)) {
+        Info.NumEdgesFromAncestors++;
+      }
+
       for (auto *ChildRegion : Region.children()) {
         if (ChildRegion->containsBlock(Predecessor)) {
           Info.NumEdgesFromChildren++;
@@ -470,13 +474,13 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
           continue;
 
         if (Cmp < 0) {
-          if (isValidHead(*CurrentRegion, Candidate)) {
-            revng_log(Log, "New Head: " << Candidate->getName());
-            revng_log(Log, "New Best:");
-            logScoreInfo(CandidateScore);
-            Best = CandidateScore;
-            CurrentHead = Candidate;
-          }
+          revng_assert(isValidHead(*CurrentRegion, Candidate));
+
+          revng_log(Log, "New Head: " << Candidate->getName());
+          revng_log(Log, "New Best:");
+          logScoreInfo(CandidateScore);
+          Best = CandidateScore;
+          CurrentHead = Candidate;
         } else {
           // 6. As a fallback, we pick the node with the shortest path from
           // entry.
@@ -490,12 +494,12 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
           size_t CandidateShortest = mapAt(*ShortestPathFromEntry, Candidate);
           if (CandidateShortest < CurrentShortest) {
 
-            if (isValidHead(*CurrentRegion, Candidate)) {
-              revng_log(Log,
-                        "New Head with shortest path from entry: "
-                          << Candidate->getName() << ": " << CandidateShortest);
-              CurrentHead = Candidate;
-            }
+            revng_assert(isValidHead(*CurrentRegion, Candidate));
+
+            revng_log(Log,
+                      "New Head with shortest path from entry: "
+                        << Candidate->getName() << ": " << CandidateShortest);
+            CurrentHead = Candidate;
           }
         }
       }
