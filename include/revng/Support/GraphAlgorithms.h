@@ -421,7 +421,7 @@ bool isDAG(GraphT Graph, Logger *Log = nullptr) {
       if (I.hasCycle()) {
         if (Log and Log->isEnabled()) {
           revng_log(*Log, "LOOP!");
-          LoggerIndent Indent {*Log};
+          LoggerIndent Indent{ *Log };
           for (NodeRef Node : *I) {
             revng_log(*Log, Node->getName());
           }

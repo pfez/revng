@@ -182,8 +182,10 @@ getHeadCandidatesInfo(GenericRegion<NodeT> &Region) {
     for (auto *ChildRegion : Region.children()) {
       if (ChildRegion->containsBlock(Node)) {
         Info.IsInChild = true;
-        if (ChildRegion->getHead() == Node)
-          Info.IsChildHead = true;
+        for (auto &GrandChild : post_order(ChildRegion)) {
+          if (ChildRegion->getHead() == Node)
+            Info.IsChildHead = true;
+        }
       }
     }
     for (NodeT Predecessor : graph_predecessors(Node)) {
@@ -439,7 +441,8 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
       // outermost regions the property is guaranteed by induction.
       revng_log(Log,
                 "Purging childrens' late entries from parent's candidates");
-      for (auto &[Node, Info] : HeadCandidatesInfo) {
+      for (auto &[Node, Info] :
+           llvm::make_early_inc_range(HeadCandidatesInfo)) {
         LoggerIndent HeadIndent{ Log };
         if (Info.IsInChild and not Info.IsChildHead) {
           for (auto ChildRegion : CurrentRegion->children()) {
