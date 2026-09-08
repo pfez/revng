@@ -445,12 +445,10 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
            llvm::make_early_inc_range(HeadCandidatesInfo)) {
         LoggerIndent HeadIndent{ Log };
         if (Info.IsInChild and not Info.IsChildHead) {
-          for (auto ChildRegion : CurrentRegion->children()) {
-            revng_log(Log,
-                      "child's late entry block can't be head of parent: "
-                        << Node->getName());
-            HeadCandidatesInfo.erase(Node);
-          }
+          revng_log(Log,
+                    "child's late entry block can't be head of parent: "
+                      << Node->getName());
+          HeadCandidatesInfo.erase(Node);
         }
       }
       revng_log(Log, "Remaining Head candidates:");
