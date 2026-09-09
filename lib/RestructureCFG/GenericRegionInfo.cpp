@@ -202,8 +202,11 @@ getHeadCandidatesInfo(GenericRegion<NodeT> &Region) {
           PredecessorInChild = true;
         }
       }
-      if (not PredecessorInChild)
-        Info.NumEdgesFromSelf++;
+      if (not PredecessorInChild) {
+        if (Region.containsBlock(Predecessor)) {
+          Info.NumEdgesFromSelf++;
+        }
+      }
     }
   }
 
@@ -457,6 +460,7 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
                       << ToPurge->getName());
           HeadCandidatesInfo.erase(ToPurge);
         }
+        revng_assert(not HeadCandidatesInfo.empty());
         if (not CandidatesToPurge.empty()) {
           revng_log(Log, "Remaining Head candidates:");
           for (const auto &[Block, _] : HeadCandidatesInfo) {
@@ -485,14 +489,15 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
           continue;
 
         if (Cmp < 0) {
-          if (VerifyLog.isEnabled())
-            revng_assert(isValidHead(*CurrentRegion, Candidate));
-
-          revng_log(Log, "New Head: " << Candidate->getName());
-          revng_log(Log, "New Best:");
-          logScoreInfo(CandidateScore);
-          Best = CandidateScore;
-          CurrentHead = Candidate;
+          if (isValidHead(*CurrentRegion, Candidate)) {
+            revng_log(Log, "New Head: " << Candidate->getName());
+            revng_log(Log, "New Best:");
+            logScoreInfo(CandidateScore);
+            Best = CandidateScore;
+            CurrentHead = Candidate;
+          } else {
+            revng_log(Log, "Invalid head: " << Candidate->getName());
+          }
         } else {
           // 6. As a fallback, we pick the node with the shortest path from
           // entry.
@@ -505,14 +510,15 @@ void GenericRegionInfo<GraphT, GT>::electHead(GraphT F) {
           size_t CurrentShortest = mapAt(*ShortestPathFromEntry, CurrentHead);
           size_t CandidateShortest = mapAt(*ShortestPathFromEntry, Candidate);
           if (CandidateShortest < CurrentShortest) {
+            if (isValidHead(*CurrentRegion, Candidate)) {
+              revng_log(Log,
+                        "New Head with shortest path from entry: "
+                          << Candidate->getName() << ": " << CandidateShortest);
 
-            if (VerifyLog.isEnabled())
-              revng_assert(isValidHead(*CurrentRegion, Candidate));
-
-            revng_log(Log,
-                      "New Head with shortest path from entry: "
-                        << Candidate->getName() << ": " << CandidateShortest);
-            CurrentHead = Candidate;
+              CurrentHead = Candidate;
+            } else {
+              revng_log(Log, "Invalid head: " << Candidate->getName());
+            }
           }
         }
       }
