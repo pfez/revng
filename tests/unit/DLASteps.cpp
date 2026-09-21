@@ -1444,3 +1444,117 @@ BOOST_AUTO_TEST_CASE(MergePointeesOfPointerUnion_skipsReachingClass) {
   revng_check(ScalarPointee == getOnlyPointee(PointerToDeeper));
   revng_check(ScalarPointee != getOnlyPointee(PointerToReaching));
 }
+
+// Runs CollapseInstanceSCCIntoArray.
+static void runCollapseInstanceSCCIntoArray(LayoutTypeSystem &TS) {
+  // Enable expensive checks
+  VerifyLog.enable();
+
+  dla::StepManager SM;
+  revng_check(SM.addStep<dla::CollapseInstanceSCCIntoArray>());
+  SM.run(TS);
+
+  dla::VectEqClasses &Eq = TS.getEqClasses();
+  Eq.compress();
+}
+
+// Returns the only successor of N reached by a strided instance edge, along
+// with the stride and the trip count of that edge.
+static std::tuple<const LTSN *, uint64_t, std::optional<uint64_t>>
+getOnlyStridedInstance(const LTSN *N) {
+  const LTSN *Target = nullptr;
+  uint64_t Stride = 0;
+  std::optional<uint64_t> TripCount;
+
+  for (const auto &Edge : N->Successors) {
+    if (not isStridedInstance(Edge))
+      continue;
+
+    revng_check(Target == nullptr);
+    Target = Edge.first;
+
+    const OffsetExpression &OE = Edge.second->getOffsetExpr();
+    revng_check(OE.Offset == 0);
+    revng_check(OE.Strides.size() == 1);
+    revng_check(OE.TripCounts.size() == 1);
+    Stride = OE.Strides.front();
+    TripCount = OE.TripCounts.front();
+  }
+
+  revng_check(Target != nullptr);
+  return { Target, Stride, TripCount };
+}
+
+/// A loop of instance edges at different offsets is an array
+///
+/// Walking an array with a pointer that steps by a constant leaves a loop
+/// behind: the pointer contains something at the offset it steps by, and that
+/// something is the pointer again. The offsets add up to the stride of the
+/// array, which takes the place of the loop, with the collapsed loop as its
+/// element and a length nobody knows.
+BOOST_AUTO_TEST_CASE(CollapseInstanceSCCIntoArray_loopIsAnArray) {
+  dla::LayoutTypeSystem TS;
+
+  // Something points at the loop from outside it, so that there is an edge to
+  // put the array on.
+  LTSN *Outside = createRoot(TS);
+  LTSN *Stepped = TS.createArtificialLayoutType();
+  LTSN *Element = TS.createArtificialLayoutType();
+  TS.addInstanceLink(Outside, Stepped, OffsetExpression{});
+
+  // The loop: the stepped pointer contains the element at offset 4, and the
+  // element is the stepped pointer again.
+  OffsetExpression Step{};
+  Step.Offset = 4;
+  TS.addInstanceLink(Stepped, Element, std::move(Step));
+  TS.addInstanceLink(Element, Stepped, OffsetExpression{});
+
+  // Merging keeps one of the two and frees the other, so take note of the IDs
+  // while they are both still around.
+  const unsigned SteppedID = Stepped->ID;
+  const unsigned ElementID = Element->ID;
+
+  runCollapseInstanceSCCIntoArray(TS);
+
+  // What used to reach the loop now reaches an array, which is a node of its
+  // own.
+  std::vector<const LTSN *> Instances = getInstancesAtOffset0(Outside);
+  revng_check(Instances.size() == 1);
+  const LTSN *Array = Instances.front();
+
+  // Its element is what the two nodes of the loop became, its stride is what
+  // the offsets around the loop add up to, and its length is not known.
+  const auto &[Target, Stride, TripCount] = getOnlyStridedInstance(Array);
+  revng_check(Stride == 4);
+  revng_check(not TripCount.has_value());
+
+  const dla::VectEqClasses &Eq = TS.getEqClasses();
+  const auto &EqClass = Eq.computeEqClass(Target->ID);
+  revng_check(EqClass.size() == 2);
+  for (const unsigned Collapsed : EqClass)
+    revng_check(Collapsed == SteppedID or Collapsed == ElementID);
+}
+
+/// A loop of instance edges at offset 0 only is left alone
+///
+/// Its offsets add up to nothing, so it says its nodes are the same thing
+/// rather than an array, and collapsing that belongs to another step.
+BOOST_AUTO_TEST_CASE(CollapseInstanceSCCIntoArray_offsetZeroLoopIsLeftAlone) {
+  dla::LayoutTypeSystem TS;
+
+  LTSN *Outside = createRoot(TS);
+  LTSN *First = TS.createArtificialLayoutType();
+  LTSN *Second = TS.createArtificialLayoutType();
+  TS.addInstanceLink(Outside, First, OffsetExpression{});
+  TS.addInstanceLink(First, Second, OffsetExpression{});
+  TS.addInstanceLink(Second, First, OffsetExpression{});
+
+  runCollapseInstanceSCCIntoArray(TS);
+
+  // Both nodes are still there, and so is the loop.
+  const dla::VectEqClasses &Eq = TS.getEqClasses();
+  revng_check(Eq.computeEqClass(First->ID).size() == 1);
+  revng_check(Eq.computeEqClass(Second->ID).size() == 1);
+  revng_check(countInstanceEdges(First, Second) == 1);
+  revng_check(countInstanceEdges(Second, First) == 1);
+}

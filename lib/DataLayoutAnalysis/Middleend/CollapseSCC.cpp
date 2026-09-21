@@ -166,6 +166,188 @@ static bool collapseSCCs(LayoutTypeSystem &TS) {
   return ToCollapse.size();
 }
 
+/// Collects the strongly connected components of \p NodeT that have more than
+/// one node.
+template<typename NodeT>
+static llvm::SmallVector<std::vector<GraphNodeT>, 0>
+getSCCs(LayoutTypeSystem &TS) {
+  std::set<GraphNodeT> VisitedNodes;
+  llvm::SmallVector<std::vector<GraphNodeT>, 0> Result;
+
+  for (const auto &Node : llvm::nodes(&TS)) {
+    revng_assert(Node != nullptr);
+    if (VisitedNodes.contains(Node))
+      continue;
+
+    for (const auto &SCC : llvm::make_range(llvm::scc_begin(NodeT(Node)),
+                                            llvm::scc_end(NodeT(Node)))) {
+      revng_assert(not SCC.empty());
+      if (VisitedNodes.contains(SCC[0]))
+        continue;
+      VisitedNodes.insert(SCC.begin(), SCC.end());
+
+      if (SCC.size() > 1)
+        Result.push_back(SCC);
+    }
+  }
+
+  return Result;
+}
+
+using NonStridedInstanceT = EdgeFilteredGraph<GraphNodeT, isNonStridedInstance>;
+
+/// Sums the offsets of the non strided instance edges that stay inside \p SCC.
+static uint64_t getStrideOf(const std::vector<GraphNodeT> &SCC) {
+  llvm::SmallPtrSet<GraphNodeT, 8> InSCC(SCC.begin(), SCC.end());
+
+  uint64_t Result = 0;
+  for (GraphNodeT Node : SCC)
+    for (const auto &Edge : Node->Successors)
+      if (isNonStridedInstance(Edge) and InSCC.contains(Edge.first))
+        Result += Edge.second->getOffsetExpr().Offset;
+
+  return Result;
+}
+
+static bool collapseInstanceSCCIntoArray(LayoutTypeSystem &TS) {
+  bool Changed = false;
+
+  for (std::vector<GraphNodeT> &SCC : getSCCs<NonStridedInstanceT>(TS)) {
+    // How much the offsets add up to going around the loop is the stride of
+    // the array it describes. When they add up to nothing the loop is made of
+    // edges at offset 0 only, which says the nodes are the same thing rather
+    // than an array, and collapsing that is somebody else's job.
+    uint64_t Stride = getStrideOf(SCC);
+    if (Stride == 0)
+      continue;
+
+    revng_log(LogVerbose,
+              "# SCC with " << SCC.size()
+                            << " elements is an array with stride " << Stride);
+
+    // Merging keeps the first node, and it wants the largest one.
+    llvm::stable_sort(SCC, sizeGreater);
+    TS.mergeNodes(SCC);
+    GraphNodeT Collapsed = SCC.front();
+
+    // Collapsing turned the edges that stayed inside the SCC into self edges,
+    // and merging drops those, so what is left of the loop is nothing. Put the
+    // array back in front of everything that reaches the collapsed node, with
+    // the node itself as its element.
+    llvm::SmallVector<LTSN::NeighborIterator> Incoming;
+    auto It = Collapsed->Predecessors.begin();
+    auto PredecessorsEnd = Collapsed->Predecessors.end();
+    for (; It != PredecessorsEnd; ++It)
+      if (isInstanceEdge(*It))
+        Incoming.push_back(It);
+
+    for (LTSN::NeighborIterator &EdgeIt : Incoming) {
+      LTSN *Array = TS.createArtificialLayoutType();
+      TS.moveEdgeTarget(Collapsed, Array, EdgeIt, 0);
+
+      // The length is unknown: the loop says how far apart the elements are,
+      // not how many of them there are.
+      OffsetExpression OE{};
+      OE.Strides.push_back(Stride);
+      OE.TripCounts.push_back(std::nullopt);
+      TS.addInstanceLink(Array, Collapsed, std::move(OE));
+    }
+
+    Changed = true;
+  }
+
+  return Changed;
+}
+
+/// Erases the non strided instance edges that reach \p Node from inside \p
+/// InSCC.
+static bool
+dropNonStridedEdgesInto(LayoutTypeSystem &TS,
+                        GraphNodeT Node,
+                        const llvm::SmallPtrSetImpl<GraphNodeT> &InSCC) {
+  llvm::SmallVector<GraphNodeT> Predecessors;
+  for (const auto &Edge : Node->Predecessors)
+    if (isNonStridedInstance(Edge) and InSCC.contains(Edge.first))
+      Predecessors.push_back(Edge.first);
+
+  bool Changed = false;
+  for (GraphNodeT Predecessor : Predecessors) {
+    auto It = Predecessor->Successors.begin();
+    while (It != Predecessor->Successors.end()) {
+      if (It->first == Node and isNonStridedInstance(*It)) {
+        It = TS.eraseEdge(Predecessor, It);
+        Changed = true;
+      } else {
+        ++It;
+      }
+    }
+  }
+
+  return Changed;
+}
+
+/// Collects the nodes of \p SCC that a strided edge staying inside it starts
+/// from.
+static llvm::SmallPtrSet<GraphNodeT, 8>
+getStridedEdgeSources(const std::vector<GraphNodeT> &SCC,
+                      const llvm::SmallPtrSetImpl<GraphNodeT> &InSCC) {
+  llvm::SmallPtrSet<GraphNodeT, 8> Result;
+
+  for (GraphNodeT Node : SCC)
+    for (const auto &Edge : Node->Successors)
+      if (isStridedInstance(Edge) and InSCC.contains(Edge.first))
+        Result.insert(Node);
+
+  return Result;
+}
+
+/// Breaks the loops of instance edges that collecting the arrays left behind.
+static bool breakRemainingInstanceSCCs(LayoutTypeSystem &TS) {
+  bool Changed = false;
+
+  // A loop with no strided edge in it either became an array just above, or is
+  // made of edges at offset 0 only, which say the nodes are the same thing and
+  // are collapsed further down the line. Either way it is not for this to
+  // touch.
+
+  // A strided edge says its target repeats inside its source, which is worth
+  // keeping, so break the loop elsewhere: drop what reaches the node such an
+  // edge starts from.
+  for (const std::vector<GraphNodeT> &SCC : getSCCs<InstanceNodeT>(TS)) {
+    llvm::SmallPtrSet<GraphNodeT, 8> InSCC(SCC.begin(), SCC.end());
+
+    for (GraphNodeT Node : getStridedEdgeSources(SCC, InSCC))
+      Changed |= dropNonStridedEdgesInto(TS, Node, InSCC);
+  }
+
+  // Whatever is still a loop is made of edges that all say something worth
+  // keeping, and there is no way to keep them all, so cut it.
+  for (const std::vector<GraphNodeT> &SCC : getSCCs<InstanceNodeT>(TS)) {
+    llvm::SmallPtrSet<GraphNodeT, 8> InSCC(SCC.begin(), SCC.end());
+
+    if (getStridedEdgeSources(SCC, InSCC).empty())
+      continue;
+
+    revng_log(LogVerbose,
+              "# Cutting a loop of " << SCC.size()
+                                     << " nodes that could not be an array");
+
+    for (GraphNodeT Node : SCC) {
+      auto It = Node->Successors.begin();
+      while (It != Node->Successors.end()) {
+        if (isInstanceEdge(*It) and InSCC.contains(It->first)) {
+          It = TS.eraseEdge(Node, It);
+          Changed = true;
+        } else {
+          ++It;
+        }
+      }
+    }
+  }
+
+  return Changed;
+}
+
 static bool collapseEqualitySCC(LayoutTypeSystem &TS) {
   return collapseSCCs<EqualityNodeT>(TS);
 }
@@ -187,6 +369,22 @@ bool CollapseEqualitySCC::runOnTypeSystem(LayoutTypeSystem &TS) {
     revng_assert(TS.verifyConsistency());
     revng_assert(TS.verifyNoEquality());
   }
+
+  return Changed;
+}
+
+bool CollapseInstanceSCCIntoArray::runOnTypeSystem(LayoutTypeSystem &TS) {
+
+  if (VerifyLog.isEnabled())
+    revng_assert(TS.verifyConsistency());
+
+  revng_log(LogVerbose, "#### Collapsing Instance SCC into array: ... ");
+  bool Changed = collapseInstanceSCCIntoArray(TS);
+  Changed |= breakRemainingInstanceSCCs(TS);
+  revng_log(LogVerbose, "#### Collapsing Instance SCC into array: Done!");
+
+  if (VerifyLog.isEnabled())
+    revng_assert(TS.verifyConsistency());
 
   return Changed;
 }

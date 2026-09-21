@@ -50,6 +50,7 @@ llvm::Error AnalyzeDataLayout::run(Model &Model,
   //
   revng_check(SM.addStep<dla::RemoveInvalidPointers>(PtrSize));
   revng_check(SM.addStep<dla::CollapseEqualitySCC>());
+  revng_check(SM.addStep<dla::CollapseInstanceSCCIntoArray>());
   revng_check(SM.addStep<dla::CollapseInstanceAtOffset0SCC>());
   revng_check(SM.addStep<dla::SimplifyInstanceAtOffset0>());
   revng_check(SM.addStep<dla::PruneLayoutNodesWithoutLayout>());

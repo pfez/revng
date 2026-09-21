@@ -14,6 +14,7 @@ namespace dla {
 const char ArrangeAccessesHierarchically::ID = 0;
 const char CollapseEqualitySCC::ID = 0;
 const char CollapseInstanceAtOffset0SCC::ID = 0;
+const char CollapseInstanceSCCIntoArray::ID = 0;
 const char CollapseSingleChild::ID = 0;
 const char CompactCompatibleArrays::ID = 0;
 const char ComputeNonInterferingComponents::ID = 0;
@@ -36,6 +37,8 @@ static std::string getStepNameFromID(const void *ID) {
     return "CollapseEqualitySCC";
   else if (ID == CollapseInstanceAtOffset0SCC::getID())
     return "CollapseInstanceAtOffset0SCC";
+  else if (ID == CollapseInstanceSCCIntoArray::getID())
+    return "CollapseInstanceSCCIntoArray";
   else if (ID == CollapseSingleChild::getID())
     return "CollapseSingleChild";
   else if (ID == CompactCompatibleArrays::getID())

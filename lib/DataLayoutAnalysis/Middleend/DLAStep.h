@@ -88,6 +88,28 @@ public:
   virtual bool runOnTypeSystem(LayoutTypeSystem &TS) override;
 };
 
+/// Turns a strongly connected component made of instance edges at various
+/// offsets into an array
+///
+/// Walking an array with a pointer that steps by a constant leaves a loop of
+/// instance edges behind: the pointer contains something at the offset it
+/// steps by, and that something is the pointer again. Such a loop cannot
+/// describe a type, since it would have no end, but it says what the array it
+/// came from looks like: its stride is how much the offsets add up to along
+/// the loop.
+class CollapseInstanceSCCIntoArray : public Step {
+  static const char ID;
+
+public:
+  static const constexpr void *getID() { return &ID; }
+
+  CollapseInstanceSCCIntoArray() : Step(ID){};
+
+  virtual ~CollapseInstanceSCCIntoArray() override = default;
+
+  virtual bool runOnTypeSystem(LayoutTypeSystem &TS) override;
+};
+
 /// dla::Step that simplifies instance-at-offset-0 edges, to reduce the
 /// unnecessary layers of nested types
 class SimplifyInstanceAtOffset0 : public Step {
