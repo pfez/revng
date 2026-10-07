@@ -412,41 +412,6 @@ void PromoteCSVs::promoteCSVs(Function *F) {
 #endif
 }
 
-struct FunctionNodeData {
-  Function *F = nullptr;
-  using UsedCSVSet = std::set<std::pair<bool, GlobalVariable *>>;
-  UsedCSVSet UsedCSVs;
-};
-
-using FunctionNode = ForwardNode<FunctionNodeData>;
-using GenericCallGraph = GenericGraph<FunctionNode>;
-
-static FunctionNode *getNode(std::map<Function *, FunctionNode *> &NodeMap,
-                             GenericCallGraph &Graph,
-                             Function *F) {
-  FunctionNode *Result = nullptr;
-
-  auto It = NodeMap.find(F);
-  if (It == NodeMap.end()) {
-    Result = Graph.addNode();
-    Result->F = F;
-    NodeMap[F] = Result;
-  } else {
-    Result = It->second;
-  }
-
-  return Result;
-}
-
-static void addEdge(FunctionNode *Source, FunctionNode *Destination) {
-
-  for (auto *Successor : Source->successors())
-    if (Successor == Destination)
-      return;
-
-  Source->addSuccessor(Destination);
-}
-
 static bool needsWrapper(Function *F) {
   // Ignore lifted functions and functions that have already been wrapped
   {
@@ -465,27 +430,10 @@ static bool needsWrapper(Function *F) {
   return any_of(F->getFunctionType()->params(), IsPointer);
 }
 
-struct UsedRegistersMFI : public SetUnionLattice<FunctionNodeData::UsedCSVSet> {
-  using Label = FunctionNode *;
-  using GraphType = GenericCallGraph *;
-  using ExtraStateType = mfp::NoExtraState;
-
-  static LatticeElement applyTransferFunction(Label L,
-                                              const LatticeElement &Value,
-                                              mfp::NoExtraState &) {
-    return combineValues(L->UsedCSVs, Value);
-  }
-};
-
 CSVsUsageMap PromoteCSVs::getUsedCSVs(ArrayRef<CallInst *> CallsRange) {
   CSVsUsageMap Result;
 
   revng_log(Log, "getUsedCSVs");
-
-  // Note: this graph goes from callee to callers
-  GenericCallGraph CallGraph;
-
-  std::map<Function *, FunctionNode *> NodeMap;
 
   // Inspect the calls we need to analyze
   //
@@ -499,7 +447,7 @@ CSVsUsageMap PromoteCSVs::getUsedCSVs(ArrayRef<CallInst *> CallsRange) {
   for (CallInst *Call : CallsRange) {
     Function *Callee = getCallee(Call);
     if (FunctionTags::Isolated.isTagOf(Callee)) {
-      Queue.push(Callee);
+      revng_abort("AAAAAA");
     } else if (FunctionTags::Helper.isTagOf(Callee)
                and AbortHelper.getCall(Call) == std::nullopt) {
       CSVsUsage &Usage = Result.Calls[Call];
@@ -523,72 +471,6 @@ CSVsUsageMap PromoteCSVs::getUsedCSVs(ArrayRef<CallInst *> CallsRange) {
     } else {
       // Just create the entry
       Result.Calls[Call];
-    }
-  }
-
-  while (not Queue.empty()) {
-    Function *F = Queue.front();
-    Queue.pop();
-
-    auto *CallerNode = getNode(NodeMap, CallGraph, F);
-
-    for (BasicBlock &BB : *F) {
-
-      for (Instruction &I : BB) {
-        bool Write = false;
-        GlobalVariable *CSV = nullptr;
-
-        if (auto *Store = dyn_cast<StoreInst>(&I)) {
-
-          // Record store
-          Write = true;
-          CSV = dyn_cast<GlobalVariable>(skipCasts(Store->getPointerOperand()));
-
-        } else if (auto *Load = dyn_cast<StoreInst>(&I)) {
-
-          // Record load
-          CSV = dyn_cast<GlobalVariable>(skipCasts(Store->getPointerOperand()));
-
-        } else if (auto *Call = dyn_cast<CallInst>(&I)) {
-          Function *Callee = getCallee(Call);
-          revng_assert(Callee != nullptr);
-
-          // In case we meet an `abort` skip this block
-          if (AbortHelper.getCall(Call).has_value())
-            break;
-
-          // TODO: use forwardTaintAnalysis
-          if (not needsWrapper(Callee))
-            continue;
-
-          // Ensure callee is visited
-          if (!NodeMap.contains(Callee))
-            Queue.push(Callee);
-
-          // Insert an edge in the call graph
-          auto *CalleeNode = getNode(NodeMap, CallGraph, Callee);
-          addEdge(CalleeNode, CallerNode);
-        }
-
-        // If there was a memory access targeting a CSV, record it
-        if (CSVs.contains(CSV)) {
-          CallerNode->UsedCSVs.insert({ Write, CSV });
-        }
-      }
-    }
-  }
-
-  auto GetMaximalFixedPoint = getMaximalFixedPoint<UsedRegistersMFI>;
-  auto AnalysisResult = GetMaximalFixedPoint({ .Flow = &CallGraph });
-
-  // Populate results set
-  for (auto &[Label, Value] : AnalysisResult) {
-    auto &FunctionDescriptor = Result.Functions[Label->F];
-    for (auto &&[IsWrite, CSV] : Value.OutValue) {
-      if (IsWrite)
-        FunctionDescriptor.Written.push_back(CSV);
-      else
-        FunctionDescriptor.Read.push_back(CSV);
     }
   }
 
