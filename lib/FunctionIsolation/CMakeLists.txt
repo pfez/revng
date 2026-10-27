@@ -10,6 +10,7 @@ revng_add_analyses_library_internal(
   IsolateFunctions.cpp
   PromoteCSVs.cpp
   RemoveExceptionalCalls.cpp
+  StableStripDeadDebugInfo.cpp
   StripDebugInfoFromHelpers.cpp
   StructInitializers.cpp)
 
