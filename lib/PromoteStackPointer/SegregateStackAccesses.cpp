@@ -6,6 +6,7 @@
 #include <set>
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
@@ -470,7 +471,13 @@ CallSite CallSite::make(CallInst *SSACSCall,
   return Result;
 }
 
-using CallSiteMap = std::map<CallInst *, CallSite>;
+/// Call sites, in the order `collectCallSites` walks the function.
+///
+/// Lowering a call site creates instructions and decides which redirector
+/// owns each writer, where the last call site to claim a writer wins, so
+/// keying this on the `CallInst` address would let the allocator pick the
+/// result.
+using CallSiteMap = llvm::MapVector<CallInst *, CallSite>;
 
 /// Given an instruction, returns what parts of the stack clobbers/writes
 ///
