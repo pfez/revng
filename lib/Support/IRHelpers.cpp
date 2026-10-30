@@ -372,18 +372,18 @@ void pruneDICompileUnits(Module &M) {
   // Purge CUs list
   CUs->clearOperands();
 
-  std::set<DICompileUnit *> Reachable;
+  // `DebugInfoFinder` already reports each compile unit once, in the order it
+  // meets them while walking the functions and their instructions, so use
+  // that order as it is. Collecting them in a container keyed by the pointer
+  // would order the rebuilt list by address instead.
   DebugInfoFinder DIFinder;
   DIFinder.processModule(M);
 
-  for (DICompileUnit *CU : DIFinder.compile_units())
-    Reachable.insert(CU);
-
-  if (Reachable.size() == 0) {
+  if (DIFinder.compile_unit_count() == 0) {
     CUs->eraseFromParent();
   } else {
     // Recreate CUs list
-    for (DICompileUnit *CU : Reachable)
+    for (DICompileUnit *CU : DIFinder.compile_units())
       CUs->addOperand(CU);
   }
 }
@@ -1084,7 +1084,7 @@ void linkFunctionModules(std::unique_ptr<llvm::Module> &&Source,
   //       ValueToValueMap used when we clone in a way that avoids cloning the
   //       metadata altogether. However, this would lead two distinct modules
   //       to share debug metadata, which are not always immutable.
-  auto *NamedMDNode = Destination->getOrInsertNamedMetadata("llvm.dbg.cu");
+  Destination->getOrInsertNamedMetadata("llvm.dbg.cu");
   pruneDICompileUnits(*Destination);
 
   revng::verify(&*Destination);
