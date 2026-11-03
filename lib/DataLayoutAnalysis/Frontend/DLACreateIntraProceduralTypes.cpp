@@ -85,15 +85,8 @@ protected:
     return { nullptr, false };
   }
 
-  std::optional<int64_t> getStride(const SCEVAddRecExpr *RE) const {
-    const auto *Stride = dyn_cast<SCEVConstant>(RE->getStepRecurrence(*SE));
-    if (not Stride or Stride->isZero())
-      return std::nullopt;
-    return getSCEVConstantSExtVal(Stride);
-  }
-
   // Gets the trip count. Returns nullopt for unknown trip counts.
-  std::optional<uint64_t> getTripCount(const SCEVAddRecExpr *RE) const {
+  std::optional<llvm::APInt> getTripCount(const SCEVAddRecExpr *RE) const {
     const Loop *L = RE->getLoop();
     revng_assert(L);
     if (not L->isLoopSimplifyForm())
@@ -112,7 +105,26 @@ protected:
 
     const auto *One = SE->getOne(TakenCount->getType());
     const auto *TripCount = cast<SCEVConstant>(SE->getAddExpr(TakenCount, One));
-    return TripCount->getAPInt().getZExtValue();
+    return TripCount->getAPInt();
+  }
+
+  llvm::APInt getConstantBase(const llvm::SCEV *BaseAddress) {
+    auto ConstAddress = dyn_cast<SCEVConstant>(BaseAddress);
+    if (ConstAddress)
+      return ConstAddress->getAPInt();
+
+    auto Add = dyn_cast<SCEVAddExpr>(BaseAddress);
+    if (Add) {
+      if (auto ConstantBase = dyn_cast<SCEVConstant>(Add->getOperand(0)))
+        return ConstantBase->getAPInt();
+    }
+
+    auto Ref = dyn_cast<SCEVAddRecExpr>(BaseAddress);
+    if (Ref) {
+      return getConstantBase(Ref->getStart());
+    }
+
+    return cast<SCEVConstant>(SE->getZero(BaseAddress->getType()))->getAPInt();
   }
 
   bool addInstanceLink(Value *PointerVal,
@@ -169,21 +181,67 @@ protected:
                                              BaseAddrSCEV->getType());
     }
 
+    unsigned BitWidth = std::max(BaseAddrBitWidth, PointerValBitWidth);
+
     const SCEV *OffsetSCEV = SE->getMinusSCEV(PointerValSCEV, BaseAddrSCEV);
+    llvm::APInt ConstantBaseOffset = getConstantBase(BaseAddrSCEV);
+    revng_assert(ConstantBaseOffset.getBitWidth() == BitWidth);
 
     OffsetExpression OE{};
     while (const auto *Rec = dyn_cast<SCEVAddRecExpr>(OffsetSCEV)) {
-      std::optional<int64_t> Stride = getStride(Rec);
-      // Don't add links for unknown or negative strides.
-      if (not Stride or *Stride < 0)
+      const auto *Stride = dyn_cast<SCEVConstant>(Rec->getStepRecurrence(*SE));
+      // Don't add links for unknown strides.
+      if (not Stride)
         return Created;
 
-      std::optional<uint64_t> TripCount = getTripCount(Rec);
+      // Don't add links for zero strides.
+      llvm::APInt S = Stride->getAPInt();
+      if (S.isZero())
+        return Created;
 
-      OE.TripCounts.push_back(std::move(TripCount));
-      OE.Strides.push_back(*Stride);
+      // Don't add links for negative strides.
+      // TODO: negative strides could be handled in principle, turning them
+      // positive and adjusting the base offset.
+      if (S.isNegative())
+        return Created;
+
+      revng_assert(S.getBitWidth() == BitWidth);
+
       OffsetSCEV = Rec->getStart();
+
+      bool Overflow = false;
+      ConstantBaseOffset = ConstantBaseOffset
+                             .uadd_ov(getConstantBase(OffsetSCEV), Overflow);
+      revng_assert(not Overflow);
+
+      std::optional<llvm::APInt> TripCount = getTripCount(Rec);
+
+      std::optional<uint64_t> NoWrapTripCount = std::nullopt;
+      if (TripCount.has_value()) {
+        llvm::APInt TC = *TripCount;
+        revng_assert(TC.getBitWidth() == BitWidth);
+
+        const auto *Base = dyn_cast<SCEVConstant>(OffsetSCEV);
+
+        Overflow = false;
+        llvm::APInt MaxArrayByteSize = llvm::APInt::getMaxValue(BitWidth)
+                                         .usub_ov(ConstantBaseOffset, Overflow);
+        revng_assert(not Overflow);
+
+        llvm::APInt MaxNonOverflowTripCount = MaxArrayByteSize.udiv(S);
+        if (TC.ugt(MaxNonOverflowTripCount))
+          TC = MaxNonOverflowTripCount;
+
+        NoWrapTripCount = TC.getZExtValue();
+      }
+
+      OE.TripCounts.push_back(std::move(NoWrapTripCount));
+      OE.Strides.push_back(S.getSExtValue());
     }
+
+    // For now we do not support offsets that are not constant.
+    if (not isa<SCEVConstant>(OffsetSCEV))
+      return Created;
 
     if (OE.Strides.size()) {
       // Nested SCEVAddRecs are not guaranteed to have strides that go from
@@ -202,10 +260,6 @@ protected:
         OE.TripCounts[Group.index()] = Group.value().second;
       }
     }
-
-    // For now we do not support offsets that are not constant.
-    if (not isa<SCEVConstant>(OffsetSCEV))
-      return Created;
 
     // If the constant can't hold a pointer it can't even be a valid offset.
     // Just bail out.
