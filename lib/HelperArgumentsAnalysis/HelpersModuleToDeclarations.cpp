@@ -33,10 +33,14 @@ public:
     // Note that we preserve CSVs and some other special variables. In
     // particular, we need CSVs to avoid having new CSVs popping up
     // post-inlining, which is problematic since sometimes we handle
-    // non-existing CSVs in a special way.
+    // non-existing CSVs in a special way. We also have to preserve the
+    // initializers of constant global variables, because they're used as inline
+    // string literals for strings that don't necessarily come from QEMU, such
+    // as arguments of calls to `revng_abort`.
     for (GlobalVariable &GV : M.globals()) {
       GV.eraseMetadata(LLVMContext::MD_dbg);
-      if (not isSpecialGV(GV) and not FunctionTags::CSV.isTagOf(&GV))
+      if (not GV.isConstant() and not isSpecialGV(GV)
+          and not FunctionTags::CSV.isTagOf(&GV))
         GV.setInitializer(nullptr);
     }
 

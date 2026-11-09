@@ -48,15 +48,18 @@ public:
 
     // Now that all of the non-`revng_inline` functions have gone, we want to
     // reduce the number of global variables with some help from GlobalDCE.
-    // We have three type of variables:
+    // We have four type of variables:
     // * Special variables (`arch_cpu_type_beacon`, `cpu_loop_exiting`) which
     //   should not be touched
     // * CSVs we want to keep only the ones used by the `revng_inline`
     //   functions, so we set their linkage temporarily to internal, run
     //   `globaldce` and then restore them to their original linkage
+    // * Constant GlobalVariables whose initializer that represent string
+    //   literals. These need not to be touched because they need to reach the
+    //   backend, to be printed as inline string literals.
     // * The rest (QEMU globals) do not need their initializer, so it's removed
     //   and their linkage is set to external. `globaldce` will also remove
-    //   them if they are unused
+    //   them if they are unused.
     StringMap<GlobalValue::LinkageTypes> GlobalLinkageBackup;
     for (GlobalVariable &GV : M.globals()) {
       GV.eraseMetadata(LLVMContext::MD_dbg);
@@ -67,8 +70,8 @@ public:
         // Save linkage to be restored after we run globaldce
         GlobalLinkageBackup[GV.getName()] = GV.getLinkage();
         GV.setLinkage(GlobalValue::InternalLinkage);
-      } else {
-        // Blank out initializers for any non-CSV GlobalVariable
+      } else if (not GV.isConstant()) {
+        // Blank out initializers for any non-constant non-CSV GlobalVariable
         GV.setInitializer(nullptr);
         GV.setLinkage(GlobalValue::ExternalLinkage);
       }
