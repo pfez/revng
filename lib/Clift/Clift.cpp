@@ -159,7 +159,8 @@ const CDialect &clift::getCDialect(mlir::ModuleOp Module) {
   if (auto Attr = Module->getAttr(CliftDialect::getCDialectAttrName()))
     return mlir::cast<CDialectAttr>(Attr).getDialect();
 
-  return CDialect::Default;
+  static constexpr CDialect Strict = CDialect::strict();
+  return Strict;
 }
 
 const CDialect &clift::getCDialect(mlir::Operation *Op) {

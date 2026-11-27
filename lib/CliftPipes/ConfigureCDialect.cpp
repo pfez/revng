@@ -2,8 +2,6 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include "llvm/ADT/STLExtras.h"
-
 #include "revng/CliftPipes/ConfigureCDialect.h"
 #include "revng/Support/YAMLTraits.h"
 
@@ -11,46 +9,30 @@ using namespace clift;
 
 namespace {
 
-struct CDialectWrapper : CDialect {
-  CDialectWrapper() {
-#define C_DIALECT_OPTION(Option) CDialect::Option = true;
-#include "revng/Support/CDialect.inc"
-  }
+/// The dynamic configuration of the pipe. The options it does not mention keep
+/// the default of the pipeline, which is the most permissive dialect.
+struct CDialectConfiguration {
+  CDialect Dialect = CDialect::permissive();
 };
 
 } // namespace
 
 template<>
-struct llvm::yaml::MappingTraits<CDialectWrapper> {
-  static void mapping(IO &TheIO, CDialectWrapper &Value) {
-    auto ToKebabCase = [](llvm::StringRef PascalCase) {
-      std::string KebabCase;
-      for (auto [I, C] : llvm::enumerate(PascalCase)) {
-        char LowerCase = C;
-        if ('A' <= C and C <= 'Z') {
-          if (I != 0)
-            KebabCase.push_back('-');
-
-          LowerCase = 'a' + (C - 'A');
-        }
-
-        KebabCase.push_back(LowerCase);
-      }
-      return KebabCase;
-    };
-
-#define C_DIALECT_OPTION(Option) \
-  TheIO.mapOptional(ToKebabCase(#Option).c_str(), Value.Option);
-
-#include "revng/Support/CDialect.inc"
+struct llvm::yaml::MappingTraits<CDialectConfiguration> {
+  static void mapping(IO &TheIO, CDialectConfiguration &Configuration) {
+    for (const CDialectOption &Option : CDialectOptions) {
+      TheIO.mapOptional(Option.ConfigurationKey.data(),
+                        Configuration.Dialect.*Option.Member);
+    }
   }
 };
 
-static CDialect parseCDialect(llvm::StringRef Config) {
-  if (not Config.empty())
-    return llvm::cantFail(fromString<CDialectWrapper>(Config));
+static CDialect parseCDialect(llvm::StringRef DynamicConfig) {
+  if (DynamicConfig.empty())
+    return CDialect::permissive();
 
-  return CDialectWrapper();
+  auto Configuration = fromString<CDialectConfiguration>(DynamicConfig);
+  return llvm::cantFail(std::move(Configuration)).Dialect;
 }
 
 using Pipe = revng::pypeline::piperuns::ConfigureFunctionCDialect;
@@ -63,6 +45,6 @@ Pipe::ConfigureFunctionCDialect(const Model &Model,
 }
 
 void Pipe::runOnCliftFunction(const model::Function &Model, FunctionOp Op) {
-  if (Dialect != CDialect::Default)
+  if (Dialect != CDialect::strict())
     setCDialect(Op->getParentOfType<mlir::ModuleOp>(), Dialect);
 }

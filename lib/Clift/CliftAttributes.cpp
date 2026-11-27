@@ -5,6 +5,7 @@
 #include <set>
 
 #include "llvm/ADT/ScopeExit.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -395,25 +396,16 @@ void DataModelAttr::print(mlir::AsmPrinter &Printer) const {
   Printer << '>';
 }
 
-//===--------------------------- CDialectAttr ---------------------------===//
+//===----------------------------- CDialectAttr ---------------------------===//
 
-namespace {
-namespace c_dialect {
+static const CDialectOption *findCDialectOption(llvm::StringRef Name) {
+  for (const CDialectOption &Option : CDialectOptions) {
+    if (Option.Name == Name)
+      return &Option;
+  }
 
-struct Option {
-  std::string_view Key;
-  bool(CDialect::*Pointer);
-};
-
-static constexpr Option Options[] = {
-#define C_DIALECT_OPTION(Option) { #Option, &CDialect::Option },
-#include "revng/Support/CDialect.inc"
-};
-
-static_assert(std::ranges::is_sorted(Options, std::less(), &Option::Key));
-
-} // namespace c_dialect
-} // namespace
+  return nullptr;
+}
 
 bool CDialectAttr::getAlias(llvm::raw_ostream &OS) const {
   OS << "c_dialect";
@@ -421,40 +413,31 @@ bool CDialectAttr::getAlias(llvm::raw_ostream &OS) const {
 }
 
 mlir::Attribute CDialectAttr::parse(mlir::AsmParser &Parser, mlir::Type) {
-  std::bitset<std::size(c_dialect::Options)> Configured;
-  CDialect Dialect = CDialect::Default;
+  llvm::SmallPtrSet<const CDialectOption *, std::size(CDialectOptions)>
+    Configured;
+  CDialect Dialect = CDialect::strict();
 
-  auto ParseOption = [&]() -> mlir::ParseResult {
+  auto ParseOption = [&Parser, &Configured, &Dialect]() -> mlir::ParseResult {
     mlir::SMLoc KeyLoc = Parser.getCurrentLocation();
-    llvm::StringRef KeyStringRef;
-    if (Parser.parseKeyword(&KeyStringRef).failed())
+    llvm::StringRef Key;
+    if (Parser.parseKeyword(&Key).failed())
       return mlir::failure();
 
-    std::string_view Key = KeyStringRef;
-    auto I = std::ranges::lower_bound(c_dialect::Options,
-                                      Key,
-                                      std::less(),
-                                      &c_dialect::Option::Key);
-
-    if (I == std::ranges::end(c_dialect::Options) or Key != I->Key)
+    const CDialectOption *Option = findCDialectOption(Key);
+    if (Option == nullptr) {
       return Parser.emitError(KeyLoc)
              << "Invalid C dialect option: '" << Key << "'";
+    }
+
+    if (not Configured.insert(Option).second) {
+      return Parser.emitError(KeyLoc)
+             << "C dialect option has already been specified: '" << Key << "'";
+    }
 
     if (Parser.parseEqual().failed())
       return mlir::failure();
 
-    if (parseBool(Parser, Dialect.*(I->Pointer)).failed())
-      return mlir::failure();
-
-    unsigned Index = I - std::ranges::begin(c_dialect::Options);
-
-    if (Configured.test(Index))
-      return Parser.emitError(KeyLoc) << "C dialect option has already been "
-                                         "specified: '"
-                                      << Key << "'";
-
-    Configured.set(Index);
-    return mlir::success();
+    return parseBool(Parser, Dialect.*Option->Member);
   };
 
   if (Parser
@@ -468,17 +451,20 @@ mlir::Attribute CDialectAttr::parse(mlir::AsmParser &Parser, mlir::Type) {
 
 void CDialectAttr::print(mlir::AsmPrinter &Printer) const {
   const CDialect &Dialect = getDialect();
+  CDialect Strict = CDialect::strict();
 
   Printer << '<';
 
+  // Only the options that differ from the strict dialect are printed, since
+  // the parser starts from the strict dialect
   bool PrintedAnyOptions = false;
-  for (const auto &Option : c_dialect::Options) {
-    bool Value = Dialect.*(Option.Pointer);
-    if (Value != CDialect::Default.*(Option.Pointer)) {
+  for (const CDialectOption &Option : CDialectOptions) {
+    bool Value = Dialect.*Option.Member;
+    if (Value != Strict.*Option.Member) {
       if (std::exchange(PrintedAnyOptions, true))
         Printer << ',';
 
-      Printer << '\n' << "  " << Option.Key << " = ";
+      Printer << '\n' << "  " << Option.Name << " = ";
       printBool(Printer, Value);
     }
   }
